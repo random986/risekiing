@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════
+   DERIVPRINTER — Global Design System
+   ═══════════════════════════════════════════ */
+
+:root {
+  /* Light mode (default) */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f2f2f2;
+  --bg-card: rgba(255, 255, 255, 0.85);
+  --bg-card-hover: rgba(245, 245, 245, 0.95);
+  --surface: #ffffff;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.15);
+  --text-primary: #111111;
+  --text-secondary: #333333;
+  --text-muted: #555555;
+  --cyan: #ff444f; /* Replaced with Deriv Pink */
+  --emerald: #ff444f; /* Replaced with Deriv Pink */
+  --amber: #00a8ff; /* Replaced yellow with bluish color */
+  --crimson: #ff444f;
+  --success: #00e676;
+  --glow-cyan: none;
+  --glow-emerald: none;
+  --glow-crimson: none;
+}
+
+.dark {
+  /* Dark mode */
+  --bg-primary: #101010;
+  --bg-secondary: #0e0e0e;
+  --bg-card: rgba(21, 23, 23, 0.85);
+  --bg-card-hover: rgba(26, 28, 28, 0.95);
+  --surface: #1a1a1a;
+  --surface-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.15);
+  --text-primary: #ffffff;
+  --text-secondary: #c2c2c2;
+  --text-muted: #999999;
+  --cyan: #ff444f; /* Replaced with Deriv Pink */
+  --emerald: #ff444f; /* Replaced with Deriv Pink */
+  --amber: #00a8ff; /* Replaced yellow with bluish color */
+  --crimson: #ff444f;
+  --success: #00e676;
+  --glow-cyan: none;
+  --glow-emerald: none;
+  --glow-crimson: none;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+  display: flex;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Glassmorphism utility */
+.glass {
+  background: var(--bg-card);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.glass:hover {
+  border-color: var(--border-hover);
+}
+
+/* Glow effects */
+.glow-cyan { box-shadow: var(--glow-cyan); }
+.glow-emerald { box-shadow: var(--glow-emerald); }
+.glow-crimson { box-shadow: var(--glow-crimson); }
+
+/* Number typography */
+.font-data {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-display {
+  font-family: 'Syne', sans-serif;
+}
+
+/* Pulse animation for live indicators */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  animation: live-pulse 1.5s ease-in-out infinite;
+}
+
+/* Selection */
+::selection {
+  background: rgba(0, 167, 158, 0.3);
+  color: var(--text-primary);
+}

@@ -1,0 +1,1 @@
+const fs = require('fs'); const content = fs.readFileSync('scratch_results.txt', 'utf8'); const regex = /wss:\/\/[^\s]+|WebSocket/gi; let match = regex.exec(content); while(match) { console.log(content.substring(Math.max(0, match.index - 50), Math.min(content.length, match.index + 150)).replace(/\n/g, ' ')); match = regex.exec(content); }
