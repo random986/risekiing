@@ -5,5 +5,5 @@ export const APP_ID = import.meta.env.VITE_DERIV_APP_ID || '33I0ILZR9c4kZBvNkie3
 
 // Automatically use the current origin (e.g., http://localhost:5173 or https://yourdomain.com)
 export const getRedirectUri = () => {
-  return 'https://derigvprinter.netlify.app';
+  return 'https://derivprinter.netlify.app';
 };
