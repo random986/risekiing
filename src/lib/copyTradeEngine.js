@@ -6,7 +6,7 @@
    ══════════════════════════════════════════════════════════════ */
 
 const WS_URL = 'wss://ws.derivws.com/websockets/v3';
-const APP_ID = '33A2vaP4EPmALB4zQaRIp';
+import { APP_ID } from '../config.js';
 
 class CopyTradeEngine {
   constructor() {
@@ -50,6 +50,10 @@ class CopyTradeEngine {
   /* ── Stop: tear down the target WS ── */
   stop() {
     this.active = false;
+    this.status = 'idle';
+    this._emitStatus();
+    this._stopPing();
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -59,8 +63,6 @@ class CopyTradeEngine {
       this.ws.close();
       this.ws = null;
     }
-    this.status = 'idle';
-    this._emitStatus();
     this._log('⏹️ Copy trade stopped.');
   }
 
@@ -167,6 +169,7 @@ class CopyTradeEngine {
     this.ws.onopen = () => {
       this._log('✅ Target WebSocket connected.');
       this.reconnectAttempts = 0;
+      this._startPing();
 
       if (usedOtp) {
         this.status = 'authorized';
@@ -214,6 +217,7 @@ class CopyTradeEngine {
       this._log('🔌 Target WebSocket disconnected.');
       this.status = 'idle';
       this._emitStatus();
+      this._stopPing();
 
       if (this.active && this.reconnectAttempts < this.maxReconnect) {
         const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempts), 30000);
@@ -266,7 +270,24 @@ class CopyTradeEngine {
       direction: this.direction
     };
   }
+
+  /* ── Internal: keep connection alive ── */
+  _startPing() {
+    this._stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ ping: 1 }));
+      }
+    }, 30000);
+  }
+
+  _stopPing() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
 }
 
-const copyTradeEngine = new CopyTradeEngine();
+export const copyTradeEngine = new CopyTradeEngine();
 export default copyTradeEngine;

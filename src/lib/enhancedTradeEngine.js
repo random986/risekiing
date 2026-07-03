@@ -170,6 +170,7 @@ const DUAL_RECOVERY_MAX_STREAK = 3;
 
 class EnhancedTradeEngine {
   constructor() {
+    this.paused = false;
     this.running = false;
     this.channels = {
       SINGLE: { active: false, step: 0, consecutiveLosses: 0, stake: 0.35, contractId: null, direction: null },
@@ -273,6 +274,13 @@ class EnhancedTradeEngine {
     // --- MATCHES strategy states ---
     this.matchesTargetDigit = null;
     this.matchesLastSwitchTime = 0;
+
+    // --- RISE/FALL strategy states ---
+    this._rfConsecutiveLosses = 0;         // Tracks consecutive Rise/Fall losses
+    this._rfPauseTicksRemaining = 0;       // Ticks left in the cooldown pause
+    this._rfPauseStartPrices = {};         // { sym: price } snapshot when pause began
+    this._rfWaitingForReversal = false;    // True = waiting for 1 opposite tick after pause
+    this._rfPauseDirection = null;         // The direction we were trading when pause triggered
 
     // --- VL quality gates ---
     this._lastTradeSettledAt = 0;
@@ -485,7 +493,7 @@ class EnhancedTradeEngine {
         this.sendLog('🧪 Entry test ended — no setup met minimum paper signals; using live scan');
         lab.confirmed = true;
         lab.pick = null;
-        this.nextAllowedTradeTime = now + this._randMs(300, 700);
+        this.nextAllowedTradeTime = 0;
       }
       return;
     }
@@ -518,7 +526,7 @@ class EnhancedTradeEngine {
       bias: best.bias,
       score: bestScore,
     };
-    this.nextAllowedTradeTime = now + this._randMs(250, 600);
+    this.nextAllowedTradeTime = 0;
     const mLabel = MARKET_LABELS[best.sym] || best.sym;
     this.sendLog(
       `✅ Entry confirmed — ${best.dir} ${mLabel} · paper ${(acc * 100).toFixed(0)}% (${best.correct}/${resolved}) · ` +
@@ -2247,10 +2255,24 @@ class EnhancedTradeEngine {
       this.over6Debt = 0;
     }
 
+    if (this.strategy === 'UNDER_8_V2') {
+      this.under8V2Phase = 'SEARCHING';
+      this.under8V2TargetMarket = null;
+      this.under8V2CurrentLosses = 0;
+      this.under8V2CurrentWins = 0;
+      this.under8V2Debt = 0;
+      this.lockedRecoveryDirection = null;
+      this.lockedRecoveryMarket = null;
+    }
     if (this.strategy === 'UNDER_8_V1') {
       this.under8Phase = 'SEARCHING';
       this.under8TargetMarket = null;
       this.under8CurrentWins = 0;
+    this.under8V2CurrentLosses = 0;
+    this.under8V2CurrentWins = 0;
+    this.under8V2Phase = 'SEARCHING';
+    this.under8V2TargetMarket = null;
+    this.under8V2Debt = 0;
       this.under8CurrentLosses = 0;
       this.under8Debt = 0;
     }
@@ -2298,6 +2320,18 @@ class EnhancedTradeEngine {
       this.under9v1Debt = 0;
     }
 
+    if (this.strategy === 'O0_U9_HYBRID') {
+      this.hybridPhase = 'SEARCHING';
+      this.hybridSide = null;               // 'OVER0' or 'UNDER9'
+      this.hybridTargetMarket = null;
+      this.hybridCurrentWins = 0;
+      this.hybridCurrentLosses = 0;
+      this.hybridDebt = 0;
+      this.hybridRecoveryConsecutiveLosses = 0; // tracks consecutive recovery losses for re-evaluation
+      this.hybridRecoveryDirection = null;      // 'OVER3' or 'UNDER7' — locked recovery side
+      this.hybridPauseUntil = 0;                // timestamp for 30s max pause
+    }
+
     if (this.strategy === 'OVER_3_V1') {
       this.over3v1Phase = 'SEARCHING';
       this.over3v1TargetMarket = null;
@@ -2306,11 +2340,20 @@ class EnhancedTradeEngine {
       this.over3v1Debt = 0;
     }
 
+    if (this.strategy === 'OVER_3_V3') {
+      this._executeOver3V3Cycle();
+      return;
+    }
     if (this.strategy === 'OVER_3_V2') {
       this.over3v2Phase = 'SEARCHING';
       this.over3v2TargetMarket = null;
       this.over3v2GreenBarDigit = null;
       this.over3v2CurrentWins = 0;
+    this.over3v3CurrentLosses = 0;
+    this.over3v3CurrentWins = 0;
+    this.over3v3Phase = 'SEARCHING';
+    this.over3v3TargetMarket = null;
+    this.over3v3Debt = 0;
       this.over3v2CurrentLosses = 0;
       this.over3v2Debt = 0;
     }
@@ -2535,6 +2578,16 @@ class EnhancedTradeEngine {
       this._startBackgroundHeartbeat();
       this._executeCycle();
     }
+  }
+
+  pause() {
+    this.paused = true;
+    this.sendLog('⏸ Engine PAUSED. Existing trades will settle, but no new trades will be placed.');
+  }
+
+  resume() {
+    this.paused = false;
+    this.sendLog('▶️ Engine RESUMED. Resuming trade execution.');
   }
 
   _bindTournamentScanner() {
@@ -4460,11 +4513,7 @@ class EnhancedTradeEngine {
   _tryFireTournamentBest() {
     if (!this.running || !this._usesTournamentMode()) return;
 
-    if (this._isPostLossPauseActive()) {
-      const waitMs = this.nextAllowedTradeTime - Date.now();
-      this.updateStatus(`⏸ Post-loss pause · ${Math.ceil(waitMs / 1000)}s`, true);
-      return;
-    }
+    // Post-loss pause removed — fire immediately
 
     // Clear any stale apex lock before checking — never block the bot indefinitely
     if (isApexOrderInFlight()) setApexOrderInFlight(false);
@@ -4717,8 +4766,8 @@ class EnhancedTradeEngine {
     this._settledContractIds.add(cid);
     this._openTournamentContracts.delete(cid);
 
-    const won = contract.status === 'won';
     const profit = parseFloat(contract.profit) || 0;
+    const won = contract.status === 'won' || profit > 0;
     const buyPrice = parseFloat(contract.buy_price) || 0;
     const market = contract.underlying || slot.sym;
     const direction = slot.dir;
@@ -4779,9 +4828,8 @@ class EnhancedTradeEngine {
       this.nextAllowedTradeTime = 0;
       this._martingaleArmAfter = 0;
     } else {
-      const baseCooldown = this.config.cooldownMs ?? 0;
-      this.nextAllowedTradeTime = Date.now() + Math.min(baseCooldown, 400);
-      this._martingaleArmAfter = Date.now() + Math.min(200, baseCooldown * 0.1);
+      this.nextAllowedTradeTime = 0;
+      this._martingaleArmAfter = 0;
     }
 
     delete this._contractToSlot[cid];
@@ -4941,6 +4989,48 @@ class EnhancedTradeEngine {
     this._pendingTournamentBuy = false;
     this._openTournamentContracts = new Map();
     this._unbindTickWakeScanner();
+
+    // ── Reset all channels to base stake so martingale doesn't bleed into next session ──
+    const stopBaseStake = this.config?.baseStake || 0.35;
+    for (const key in this.channels) {
+      if (this.channels[key].contractId) {
+        if (!this._contractLedger) this._contractLedger = {};
+        this._contractLedger[this.channels[key].contractId] = {
+          channelKey: key, 
+          direction: this.channels[key].direction, 
+          stake: this.channels[key].stake
+        };
+      }
+      this.channels[key] = {
+        active: false,
+        step: 0,
+        consecutiveLosses: 0,
+        stake: stopBaseStake,
+        contractId: null,
+        direction: null
+      };
+    }
+
+    // ── Reset all strategy phase/debt state to prevent cross-session bleed ──
+    this.under8V2Phase = 'SEARCHING';      this.under8V2Debt = 0;    this.under8V2CurrentLosses = 0;
+    this.under8Phase  = 'SEARCHING';      this.under8Debt = 0;      this.under8CurrentLosses = 0;
+    this.over3v3Phase = 'SEARCHING';      this.over3v3Debt = 0;     this.over3v3CurrentLosses = 0;
+    this.over3v2Phase = 'SEARCHING';      this.over3v2Debt = 0;     this.over3v2CurrentLosses = 0;
+    this.over3v1Phase = 'SEARCHING';      this.over3v1Debt = 0;     this.over3v1CurrentLosses = 0;
+    this.over5v1Phase = 'SEARCHING';      this.over5v1Debt = 0;     this.over5v1CurrentLosses = 0;
+    this.over6Phase   = 'SEARCHING';      this.over6Debt = 0;       this.over6CurrentLosses = 0;
+    this.over6v2Phase = 'SEARCHING';      this.over6v2Debt = 0;     this.over6v2CurrentLosses = 0;
+    this.under3v1Phase= 'SEARCHING';      this.under3v1Debt = 0;    this.under3v1CurrentLosses = 0;
+    this.under7v1Phase= 'SEARCHING';
+    this.under9v1Phase= 'SEARCHING';      this.under9v1Debt = 0;    this.under9v1CurrentLosses = 0;
+    this.evenV1Phase  = 'SEARCHING';      this.evenV1Debt = 0;      this.evenV1CurrentLosses = 0;
+    this.oddV1Phase   = 'SEARCHING';      this.oddV1Debt = 0;       this.oddV1CurrentLosses = 0;
+    this.over0v1Phase = 'SEARCHING_OVER_0'; this.over0v1Debt = 0;   this.over0v1CurrentLosses = 0;
+    this.hybridPhase  = 'SEARCHING';        this.hybridDebt = 0;    this.hybridCurrentLosses = 0;
+    this.hybridSide = null; this.hybridRecoveryConsecutiveLosses = 0; this.hybridRecoveryDirection = null; this.hybridPauseUntil = 0;
+    this.lockedRecoveryDirection = null;
+    this.lockedRecoveryMarket    = null;
+    this.sessionConsecutiveLosses = 0;
 
     // MATCH_DIFF Auto-Restart schedule
     if (this._restartTimer) {
@@ -5172,9 +5262,8 @@ class EnhancedTradeEngine {
     if (cascade.freezeMartingale) this._cascadeMartingaleFrozen = true;
 
     const maxStreak = Number(this.config?.maxLossStreak) || 0;
-    const pauseMs = Number(this.config?.lossStreakPauseMs) || Number(this.config?.cascadePauseMs) || 12000;
     if (maxStreak > 0 && this.sessionConsecutiveLosses >= maxStreak) {
-      this._lossStreakCooldownUntil = Date.now() + pauseMs;
+      this._lossStreakCooldownUntil = 0; // No pause — continue immediately
       if (!this._isWinningDualStrategy()) {
         this._sessionMartingaleStep = 0;
         for (const ch of Object.values(this.channels || {})) {
@@ -5332,14 +5421,7 @@ class EnhancedTradeEngine {
    * wait for the next tick (100ms).
    */
   _isRecoveryTickFavorable(market, direction) {
-    const ticks = scanner.buffers[market];
-    if (!ticks || ticks.length < 2) return true; // not enough data, allow trade
-    const last1 = ticks[ticks.length - 1];
-    const last2 = ticks[ticks.length - 2];
-    const win1 = this._directionWouldWin(last1, direction);
-    const win2 = this._directionWouldWin(last2, direction);
-    // At least 1 of the last 2 ticks must be favorable
-    return win1 || win2;
+    return true;
   }
 
   _getBaselineWinRate(direction) {
@@ -5496,7 +5578,9 @@ class EnhancedTradeEngine {
       }
       const unsub = derivWS.on('proposal_open_contract', (msg) => {
         const c = msg.proposal_open_contract;
-        if (!c || c.contract_id !== contractId || !c.is_sold) return;
+        if (!c || c.contract_id !== contractId) return;
+        const isSettled = c.is_sold || c.is_expired || (c.status && c.status !== 'open');
+        if (!isSettled) return;
         unsub();
         clearTimeout(timer);
         resolve(c);
@@ -6147,14 +6231,18 @@ class EnhancedTradeEngine {
     step = this._martingaleStepForStake(step);
 
     const winningUnlimited = this._isWinningDualStrategy() && !useSessionStep;
+    let maxStep = 0;
     if (!winningUnlimited) {
-      const maxStep = this._getMaxMartingaleStep();
+      maxStep = this._getMaxMartingaleStep();
       if (maxStep > 0) step = Math.min(step, maxStep);
     }
 
     let stake = base * Math.pow(mult, step);
     const cap = this._getMaxStakeCap();
     if (cap != null) stake = Math.min(stake, cap);
+    
+    console.log(`[MARTINGALE DEBUG] channel=${channel?.direction || 'SINGLE'} base=${base} mult=${mult} step=${step} maxStep=${maxStep} cap=${cap} finalStake=${stake}`);
+    
     return Math.max(0.35, parseFloat(stake.toFixed(2)));
   }
 
@@ -7094,12 +7182,7 @@ class EnhancedTradeEngine {
       return;
     }
 
-    if (this._isPostLossPauseActive()) {
-      const waitMs = this.nextAllowedTradeTime - Date.now();
-      this.updateStatus(`⏳ Post-loss pause → ${Math.ceil(waitMs / 1000)}s`, true);
-      this._scheduleNext(Math.min(waitMs, 500));
-      return;
-    }
+    // Post-loss pause removed — fire immediately
 
     if (this._usesIsolatedSniperMode()) {
       void this._fireIsolatedSniperTrade().then((fired) => {
@@ -7263,6 +7346,10 @@ class EnhancedTradeEngine {
   }
 
   _executeCycle() {
+    if (this.paused) {
+      this._scheduleNext(100);
+      return;
+    }
     if (!this.running) return;
     if (!derivWS.isReady) {
       this.updateStatus('Waiting for connection...');
@@ -7270,17 +7357,46 @@ class EnhancedTradeEngine {
       return;
     }
 
-    // Stuck watchdog
+    // Stuck watchdog & Fast Polling
     const now = Date.now();
     let watchdogReleased = false;
     for (const key in this.channels) {
       const ch = this.channels[key];
-      if (ch.active && ch.placedAt && (now - ch.placedAt > 30000)) {
-        this.sendLog(`⚠️ Watchdog: Releasing stuck channel [${key}] after 30s`);
-        ch.active = false;
-        ch.contractId = null;
-        if (key === 'SINGLE') ch.direction = null;
-        watchdogReleased = true;
+      if (ch.active && ch.placedAt && ch.contractId) {
+        const elapsed = now - ch.placedAt;
+        
+        if (elapsed > 3000 && !ch.pollRequested) {
+          ch.pollRequested = true;
+          derivWS.sendRaw({ proposal_open_contract: 1, contract_id: ch.contractId });
+          setTimeout(() => { if (ch) ch.pollRequested = false; }, 3000);
+        }
+
+        // Hard watchdog: 12s max
+        if (elapsed > 12000) {
+          this.sendLog(`⚠️ Watchdog: Releasing stuck channel [${key}] after 12s`);
+          
+          if (this.onTradeUpdate) {
+            this.onTradeUpdate({
+              id: ch.contractId,
+              market: this.activeMarket,
+              direction: ch.direction || 'UNKNOWN',
+              stake: ch.stake || 0,
+              profit: -(ch.stake || 0),
+              won: false,
+              time: now,
+              exitTick: '?',
+              pending: false
+            });
+          }
+
+          // Wipe zombie subscriptions from Deriv to prevent max subscription limit
+          derivWS.sendRaw({ forget_all: 'proposal_open_contract' });
+
+          ch.active = false;
+          ch.contractId = null;
+          if (key === 'SINGLE') ch.direction = null;
+          watchdogReleased = true;
+        }
       }
     }
     if (watchdogReleased) {
@@ -7329,11 +7445,67 @@ class EnhancedTradeEngine {
       if (this.config.takeProfit > 0) {
         if (this.config.takeProfitType === 'wins') {
           if (this.sessionWinCount >= this.config.takeProfit) {
+            if (this.strategy === 'O0_U9_HYBRID') {
+              // HYBRID: If we still have unrecovered debt, do NOT reset — keep recovering
+              if (this.hybridPhase === 'RECOVERY' && this.hybridDebt > 0.001) {
+                this.sendLog(`⚠️ O0/U9 HYBRID: Global TP (wins) triggered but debt $${this.hybridDebt.toFixed(2)} still pending. Continuing recovery...`);
+                this.sessionWinCount = 0; // Reset win counter so it doesn't keep firing
+                this._scheduleNext(500);
+                return;
+              }
+              // No debt — safe to reset everything and re-search a fresh market
+              this.sendLog(`🎯 O0/U9 HYBRID: Take Profit hit! ${this.sessionWinCount} wins. Resetting and searching new market...`);
+              this.hybridPhase = 'SEARCHING';
+              this.hybridSide = null;
+              this.hybridTargetMarket = null;
+              this.hybridDebt = 0;
+              this.hybridCurrentWins = 0;
+              this.hybridCurrentLosses = 0;
+              this.hybridRecoveryConsecutiveLosses = 0;
+              this.hybridRecoveryDirection = null;
+              this._hybridNeedsReevaluation = false;
+              this.hybridPauseUntil = 0;
+              this.sessionConsecutiveLosses = 0;
+              this._syncSessionMartingaleStep(0);
+              this.sessionWinCount = 0;
+              this.sessionPnL = 0;
+              this.sessionOpeningBalance = balance;
+              this._scheduleNext(500);
+              return;
+            }
             this.stop(`Take Profit Reached: Session reached ${this.sessionWinCount} wins (Target: ${this.config.takeProfit} wins)`);
             return;
           }
         } else {
           if (currentPnL >= this.config.takeProfit) {
+            if (this.strategy === 'O0_U9_HYBRID') {
+              // HYBRID: If we still have unrecovered debt, do NOT reset — keep recovering
+              if (this.hybridPhase === 'RECOVERY' && this.hybridDebt > 0.001) {
+                this.sendLog(`⚠️ O0/U9 HYBRID: Global TP (currency) triggered but debt $${this.hybridDebt.toFixed(2)} still pending. Continuing recovery...`);
+                this.sessionPnL = 0; // Reset PnL counter so it doesn't keep firing
+                this._scheduleNext(500);
+                return;
+              }
+              // No debt — safe to reset everything and re-search a fresh market
+              this.sendLog(`🎯 O0/U9 HYBRID: Take Profit hit! PnL +$${currentPnL.toFixed(2)}. Resetting and searching new market...`);
+              this.hybridPhase = 'SEARCHING';
+              this.hybridSide = null;
+              this.hybridTargetMarket = null;
+              this.hybridDebt = 0;
+              this.hybridCurrentWins = 0;
+              this.hybridCurrentLosses = 0;
+              this.hybridRecoveryConsecutiveLosses = 0;
+              this.hybridRecoveryDirection = null;
+              this._hybridNeedsReevaluation = false;
+              this.hybridPauseUntil = 0;
+              this.sessionConsecutiveLosses = 0;
+              this._syncSessionMartingaleStep(0);
+              this.sessionWinCount = 0;
+              this.sessionPnL = 0;
+              this.sessionOpeningBalance = balance;
+              this._scheduleNext(500);
+              return;
+            }
             this.stop(`Take Profit Reached: PnL is +$${currentPnL.toFixed(2)} (Target: +$${this.config.takeProfit.toFixed(2)})`);
             return;
           }
@@ -7353,25 +7525,7 @@ class EnhancedTradeEngine {
       }
     }
 
-    if (this._isPostLossPauseActive()) {
-      const waitMs = this.nextAllowedTradeTime - Date.now();
-      this.updateStatus(`⏸ Post-loss pause · ${Math.ceil(waitMs / 1000)}s`, true);
-      this._scheduleNext(Math.min(waitMs, 500));
-      return;
-    }
-
-    if (!this._isWinningDualStrategy() && this._postTradeTickCooldown > 0) {
-      this.updateStatus(`⏳ Cooldown · ${this._postTradeTickCooldown} tick${this._postTradeTickCooldown > 1 ? 's' : ''}…`, true);
-      this._scheduleNext(300);
-      return;
-    }
-
-    if (!this._isWinningDualStrategy() && this.nextAllowedTradeTime && now < this.nextAllowedTradeTime) {
-      const waitMs = this.nextAllowedTradeTime - now;
-      this.updateStatus(`⏳ Cooldown ${Math.ceil(waitMs / 1000)}s`, true);
-      this._scheduleNext(Math.min(waitMs, 500));
-      return;
-    }
+    // All post-loss pauses, tick cooldowns, and nextAllowedTradeTime removed — fire immediately
 
     const isInstantWinningPair = this.strategy === 'OU_WINNING' || this.strategy === 'EO_WINNING';
     if (!isInstantWinningPair && !this._canFireTradeNow()) {
@@ -7393,6 +7547,10 @@ class EnhancedTradeEngine {
       this._executeOver6Cycle();
       return;
     }
+    if (this.strategy === 'UNDER_8_V2') {
+      this._executeUnder8V2Cycle();
+      return;
+    }
     if (this.strategy === 'UNDER_8_V1') {
       this._executeUnder8Cycle();
       return;
@@ -7403,6 +7561,10 @@ class EnhancedTradeEngine {
     }
     if (this.strategy === 'OVER_3_V1') {
       this._executeOver3V1Cycle();
+      return;
+    }
+    if (this.strategy === 'OVER_3_V3') {
+      this._executeOver3V3Cycle();
       return;
     }
     if (this.strategy === 'OVER_3_V2') {
@@ -7437,13 +7599,174 @@ class EnhancedTradeEngine {
       this._executeUnder9V1Cycle();
       return;
     }
+    if (this.strategy === 'O0_U9_HYBRID') {
+      this._executeO0U9HybridCycle();
+      return;
+    }
     if (this.strategy === 'RANDOM_PICKER') {
       this._executeRandomPickerCycle();
+      return;
+    }
+    if (this.strategy === 'RISE' || this.strategy === 'FALL') {
+      this._executeRiseFallCycle();
       return;
     }
 
     // All other strategies (BOTH5, BOTH, OU_WINNING, EO_WINNING, DIFF, etc.)
     this._executeLegacyCycle();
+  }
+
+  // --- RISE / FALL STRATEGY ---
+
+  /**
+   * Check that a market has no consecutive rise or fall streak > 5
+   * anywhere in its last 1000 ticks of price history.
+   */
+  _hasNoLongRiseFallStreaks(prices) {
+    if (!prices || prices.length < 50) return false;
+    let riseStreak = 0;
+    let fallStreak = 0;
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i] > prices[i - 1]) { riseStreak++; fallStreak = 0; }
+      else if (prices[i] < prices[i - 1]) { fallStreak++; riseStreak = 0; }
+      else { riseStreak = 0; fallStreak = 0; }
+      if (riseStreak > 5 || fallStreak > 5) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Score a market for Rise/Fall suitability.
+   * Returns { score, riseRatio, fallRatio, maxStreak } or null if disqualified.
+   *
+   * Criteria:
+   *   1. No streak > 5 in the last 1000 ticks              (hard filter)
+   *   2. The market lightly favours the selected direction  (soft score)
+   *   3. It is not too one-sided (direction ratio < 65%)    (hard filter)
+   */
+  _scoreMarketForRiseFall(sym, direction) {
+    const prices = scanner.priceBuffers[sym] || [];
+    if (prices.length < 100) return null;
+
+    // --- Hard filter: no long streaks ---
+    let riseStreak = 0, fallStreak = 0, maxStreak = 0;
+    let rises = 0, falls = 0;
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i] > prices[i - 1]) {
+        riseStreak++; fallStreak = 0; rises++;
+      } else if (prices[i] < prices[i - 1]) {
+        fallStreak++; riseStreak = 0; falls++;
+      } else {
+        riseStreak = 0; fallStreak = 0;
+      }
+      const localMax = Math.max(riseStreak, fallStreak);
+      if (localMax > maxStreak) maxStreak = localMax;
+    }
+    // Disqualify if any streak exceeded 5
+    if (maxStreak > 5) return null;
+
+    const total = rises + falls;
+    if (total === 0) return null;
+
+    const riseRatio = rises / total;
+    const fallRatio = falls / total;
+
+    // --- Hard filter: reject too one-sided markets (> 65% in one direction) ---
+    if (riseRatio > 0.65 || fallRatio > 0.65) return null;
+
+    // --- Soft score: favour markets that lean towards our direction ---
+    const favourRatio = direction === 'RISE' ? riseRatio : fallRatio;
+    // Ideal range: 50-60%. Penalise below 45% (against us) and above 65% (too one-sided).
+    // A market at ~55% in our direction is perfect.
+    const score = favourRatio * 100;
+
+    return { score, riseRatio, fallRatio, maxStreak };
+  }
+
+  /**
+   * Main Rise/Fall execution cycle.
+   * Handles: normal trading, 3-loss pause, reversal observation, and re-entry.
+   */
+  _executeRiseFallCycle() {
+    const channel = this.channels.SINGLE;
+    if (channel.active) {
+      this._scheduleNext(100);
+      return;
+    }
+
+    // ═══ PHASE 1: PAUSE COOLDOWN (counting ticks) ═══
+    if (this._rfPauseTicksRemaining > 0) {
+      this._rfPauseTicksRemaining--;
+      if (this._rfPauseTicksRemaining === 0) {
+        // Pause ended — now watch for one opposite-direction tick before re-entering
+        this._rfWaitingForReversal = true;
+        this.sendLog(`⏸️ Pause complete — now watching for reversal tick...`);
+      }
+      this.updateStatus(`⏸️ Cooling down after 3 losses (${this._rfPauseTicksRemaining} ticks left)...`);
+      this._scheduleNext(500);
+      return;
+    }
+
+    // ═══ PHASE 2: WAITING FOR STREAK TO BREAK ═══
+    if (this._rfWaitingForReversal) {
+      const mkt = this.activeMarket || 'R_50';
+      const prices = scanner.priceBuffers[mkt] || [];
+      if (prices.length >= 2) {
+        const last = prices[prices.length - 1];
+        const prev = prices[prices.length - 2];
+        const lostDir = this._rfPauseDirection; // direction we were trading
+        // If trading RISE and losing → market was falling → wait for a RISE tick (last > prev) to confirm fall streak is broken
+        // If trading FALL and losing → market was rising → wait for a FALL tick (last < prev) to confirm rise streak is broken
+        const streakBroken = lostDir === 'RISE' ? (last > prev) : (last < prev);
+        if (streakBroken) {
+          const oppositeStr = lostDir === 'RISE' ? 'fall' : 'rise';
+          this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak broken on ${MARKET_LABELS[mkt] || mkt} — re-entering ${lostDir}.`);
+          this._rfWaitingForReversal = false;
+          this._rfPauseDirection = null;
+          // Fall through to normal trade placement below
+        } else {
+          const waitingFor = lostDir === 'RISE' ? 'rise' : 'fall';
+          this.updateStatus(`👁️ Waiting for ${waitingFor} tick to break streak on ${MARKET_LABELS[mkt] || mkt}...`);
+          this._scheduleNext(500);
+          return;
+        }
+      } else {
+        this._scheduleNext(500);
+        return;
+      }
+    }
+
+    // ═══ PHASE 3: MARKET SELECTION ═══
+    const direction = this.strategy; // 'RISE' or 'FALL'
+    let bestMarket = null;
+    let bestScore = -1;
+
+    for (const sym of MARKETS) {
+      const result = this._scoreMarketForRiseFall(sym, direction);
+      if (result && result.score > bestScore) {
+        bestScore = result.score;
+        bestMarket = sym;
+      }
+    }
+
+    if (!bestMarket) {
+      this.updateStatus('🔍 No suitable market found (streaks/bias) — rescanning...');
+      this._scheduleNext(1000);
+      return;
+    }
+
+    this.activeMarket = bestMarket;
+
+    // ═══ PHASE 4: PLACE TRADE ═══
+    const stake = channel.stake || this.config.baseStake || 0.35;
+
+    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[bestMarket] || bestMarket} at $${stake.toFixed(2)} (bias score: ${bestScore.toFixed(1)}%)`);
+    this.updateStatus(`Placing ${this.strategy} Trade...`);
+
+    this._placeTrade('SINGLE', this.strategy, stake, null, bestMarket, {
+      duration: this.config.riseFallDuration || 30,
+      durationUnit: this.config.riseFallDurationUnit || 's'
+    });
   }
 
   // --- MATCHES DIGIT SNIPER STRATEGY ---
@@ -7598,7 +7921,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 6: No market meets Over six conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -7618,7 +7941,7 @@ class EnhancedTradeEngine {
 
       if (this.over6FirstTradeFired) {
         this.updateStatus('OVER 6: Executing continuous trade...');
-        const stake = this.channels.SINGLE.stake || this.config.baseStake;
+        const stake = this._resolveTradeStake('SINGLE');
         this._placeTrade('SINGLE', 'OVER6', stake);
         this._scheduleNext(50);
         return;
@@ -7639,7 +7962,7 @@ class EnhancedTradeEngine {
         this.over6FirstTradeFired = true;
         this.sendLog(`OVER 6: Trigger reached (${currentStreak} lower digits). Firing FIRST trade.`);
         this.updateStatus('OVER 6: Executing');
-        const stake = this.channels.SINGLE.stake || this.config.baseStake;
+        const stake = this._resolveTradeStake('SINGLE');
         this._placeTrade('SINGLE', 'OVER6', stake);
         this._scheduleNext(50); // Wait for order to place
         return;
@@ -7656,7 +7979,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.over6TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`OVER 6: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -7674,6 +7997,101 @@ class EnhancedTradeEngine {
       this.updateStatus(`OVER 6: Debt Recovery base stake (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
+      return;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UNDER 8 V2 CYCLE
+  //  Entry: Scans 500 ticks. Digits 8 & 9 < 10%, Top digit < 7, Bottom digit >= 7.
+  //  If matched, triggers UNDER 8 trade.
+  //  Recovery: Rapid fire blind OVER 3.
+  // ═══════════════════════════════════════════════════════════════════════════
+  _executeUnder8V2Cycle() {
+    const channel = this.channels.SINGLE;
+    if (channel.active) {
+      this._scheduleNext(10);
+      return;
+    }
+
+    if (!this.under8V2Phase || this.under8V2Phase === 'SEARCHING') {
+      this.updateStatus('UNDER 8 V2: Scanning all markets (V1 conditions)...');
+      let bestMarket = null;
+
+      for (const sym of MARKETS) {
+        if (this.marketStats[sym]?.quarantinedUntil > Date.now()) continue;
+        const ticks = scanner.buffers[sym] || [];
+        if (ticks.length < 500) continue; 
+
+        const counts = Array(10).fill(0);
+        for (const t of ticks) counts[t]++;
+        const freqs = counts.map((c, i) => ({ digit: i, pct: (c / ticks.length) * 100 }));
+        
+        const pct8 = freqs[8].pct;
+        const pct9 = freqs[9].pct;
+        
+        const sorted = [...freqs].sort((a, b) => b.pct - a.pct);
+        const top1 = sorted[0].digit;
+        const bottom1 = sorted[9].digit;
+        
+        if (pct8 < 10 && pct9 < 10 && top1 < 7 && bottom1 >= 7) {
+          bestMarket = sym;
+          this.sendLog(`UNDER 8 V2: Market match on ${MARKET_LABELS[sym] || sym}. Conditions met.`);
+          break;
+        }
+      }
+
+      if (!bestMarket) {
+        this._scheduleNext(200);
+        return;
+      }
+
+      this.activeMarket = bestMarket;
+      if (this.onMarketSwitch) this.onMarketSwitch(bestMarket);
+      this.under8V2TargetMarket = bestMarket;
+      this.under8V2Phase = 'TRADING';
+    }
+
+    if (this.under8V2Phase === 'TRADING') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(0);
+        return;
+      }
+      const stake = this._resolveTradeStake('SINGLE');
+      this._placeTrade('SINGLE', 'UNDER8', stake);
+      this._scheduleNext(0);
+      return;
+    }
+
+    if (this.under8V2Phase === 'RECOVERY' || this.under8V2Phase === 'DEBT_RECOVERY') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(0);
+        return;
+      }
+      
+      // Strict lockdown on original market and OVER 3 direction for blind rapid recovery
+      if (!this.lockedRecoveryMarket || !this.lockedRecoveryDirection) {
+        this.lockedRecoveryMarket = this.under8V2TargetMarket;
+        this.lockedRecoveryDirection = 'OVER3'; // Hard lock to the OVER 3 direction
+        this.sendLog(`UNDER 8 V2: Locked strictly into ${MARKET_LABELS[this.lockedRecoveryMarket] || this.lockedRecoveryMarket} ${this.lockedRecoveryDirection} for blind recovery firing.`);
+      }
+
+      const recMarket = this.lockedRecoveryMarket;
+      const recDir = this.lockedRecoveryDirection;
+
+      // Enforce step based on consecutive losses to ensure Martingale applies
+      if (this.config.recoveryEnabled !== false && this.under8V2CurrentLosses > 0) {
+        const hold = this._getMartingaleHoldAfterStep();
+        const max = this._getMaxMartingaleStep() || 99;
+        const targetStep = Math.min(this.under8V2CurrentLosses, max);
+        channel.step = hold > 0 ? Math.min(hold, targetStep) : targetStep;
+      }
+
+      const stake = this._resolveTradeStake('SINGLE');
+
+      this.updateStatus(`UNDER 8 V2: Rapid Recovery (${recDir}) on ${MARKET_LABELS[recMarket] || recMarket} Stake: $${stake.toFixed(2)} (Loss ${this.under8V2CurrentLosses})...`);
+      this._placeTrade('SINGLE', recDir, stake);
+      this._scheduleNext(10);
       return;
     }
   }
@@ -7712,7 +8130,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('UNDER 8 V1: No market meets UNDER 8 V1 conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -7730,7 +8148,7 @@ class EnhancedTradeEngine {
       }
 
       this.updateStatus('UNDER 8 V1: Executing continuous trade...');
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'UNDER8', stake);
       this._scheduleNext(50);
       return;
@@ -7743,7 +8161,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.under8TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`UNDER 8 V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -7809,7 +8227,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('UNDER 7 V1: No market meets conditions.');
+        this._scheduleNext(200);
         return;
       }
 
@@ -7850,7 +8268,7 @@ class EnhancedTradeEngine {
 
       const mktLabel = MARKET_LABELS[this.under7v1TargetMarket] || this.under7v1TargetMarket;
       this.updateStatus(`UNDER 7 V1: Trading continuously on ${mktLabel}...`);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'UNDER7', stake, null, null, { duration: 2 });
       this._scheduleNext(50);
       return;
@@ -7863,7 +8281,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.under7v1TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`UNDER 7 V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -7955,7 +8373,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('EVEN V1: No market meets conditions.');
+        this._scheduleNext(200);
         return;
       }
 
@@ -7983,7 +8401,7 @@ class EnhancedTradeEngine {
 
       const mktLabel = MARKET_LABELS[this.evenV1TargetMarket] || this.evenV1TargetMarket;
       this.updateStatus(`EVEN V1: Trading on ${mktLabel}...`);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'EVEN', stake);
       this._scheduleNext(50);
       return;
@@ -7996,7 +8414,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.evenV1TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`EVEN V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8100,7 +8518,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('ODD V1: No market meets conditions.');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8128,7 +8546,7 @@ class EnhancedTradeEngine {
 
       const mktLabel = MARKET_LABELS[this.oddV1TargetMarket] || this.oddV1TargetMarket;
       this.updateStatus(`ODD V1: Trading on ${mktLabel}...`);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'ODD', stake);
       this._scheduleNext(50);
       return;
@@ -8141,7 +8559,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.oddV1TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`ODD V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8237,7 +8655,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 3 V1: No market meets conditions (Green, Blue, Red all > 4).');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8264,11 +8682,11 @@ class EnhancedTradeEngine {
       }
 
 
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       const mktLabel = MARKET_LABELS[this.over3v1TargetMarket] || this.over3v1TargetMarket;
       this.updateStatus(`OVER 3 V1: Trading on ${mktLabel}...`);
       this._placeTrade('SINGLE', 'OVER3', stake);
-      this._scheduleNext(50);
+      this._scheduleNext(0);
       return;
     }
 
@@ -8283,9 +8701,9 @@ class EnhancedTradeEngine {
       const mktLabel = MARKET_LABELS[this.over3v1TargetMarket] || this.over3v1TargetMarket;
       this.updateStatus(`OVER 3 V1 RECOVERY: ${tradeKey} on ${mktLabel}...`);
 
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', tradeKey, stake);
-      this._scheduleNext(50);
+      this._scheduleNext(0);
       return;
     }
 
@@ -8302,6 +8720,90 @@ class EnhancedTradeEngine {
 
       const stake = this.config.baseStake;
       this._placeTrade('SINGLE', tradeKey, stake);
+      this._scheduleNext(0);
+      return;
+    }
+  }
+
+
+  _executeOver3V3Cycle() {
+    const channel = this.channels.SINGLE;
+    if (channel.active) {
+      this._scheduleNext(100);
+      return;
+    }
+
+    if (this.over3v3Phase === 'SEARCHING') {
+      this.updateStatus('OVER 3 V3: Scanning all markets for momentum...');
+      let bestMarket = null;
+      let highestOver3Pct = 0;
+
+      for (const sym of MARKETS) {
+        if (this.marketStats[sym]?.quarantinedUntil > Date.now()) continue;
+        const ticks = scanner.buffers[sym] || [];
+        if (ticks.length < 400) continue; 
+
+        const half = Math.floor(ticks.length / 2);
+        const olderHalf = ticks.slice(0, half);
+        const newerHalf = ticks.slice(half);
+
+        const pctOver3 = (arr) => arr.filter(t => t > 3).length / arr.length * 100;
+        
+        const olderPct = pctOver3(olderHalf);
+        const newerPct = pctOver3(newerHalf);
+
+        if (newerPct > olderPct && newerPct > highestOver3Pct) {
+          highestOver3Pct = newerPct;
+          bestMarket = sym;
+        }
+      }
+
+      if (!bestMarket) {
+        this._scheduleNext(200);
+        return;
+      }
+
+      this.activeMarket = bestMarket;
+      if (this.onMarketSwitch) this.onMarketSwitch(bestMarket);
+      this.over3v3TargetMarket = bestMarket;
+      this.over3v3Phase = 'TRADING';
+      this.sendLog("OVER 3 V3: Rapid firing enabled. Instantly entering OVER 3.");
+    }
+
+    if (this.over3v3Phase === 'TRADING') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(50);
+        return;
+      }
+      const stake = this._resolveTradeStake('SINGLE');
+      this._placeTrade('SINGLE', 'OVER3', stake);
+      this._scheduleNext(50);
+      return;
+    }
+
+    if (this.over3v3Phase === 'RECOVERY' || this.over3v3Phase === 'DEBT_RECOVERY') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(50);
+        return;
+      }
+      
+      // Strict lockdown on original market and direction for blind rapid recovery
+      if (!this.lockedRecoveryMarket || !this.lockedRecoveryDirection) {
+        this.lockedRecoveryMarket = this.over3v3TargetMarket;
+        this.lockedRecoveryDirection = 'OVER3'; // Hard lock to the original direction
+        this.sendLog(`OVER 3 V3: Locked strictly into ${MARKET_LABELS[this.lockedRecoveryMarket] || this.lockedRecoveryMarket} ${this.lockedRecoveryDirection} for blind recovery firing.`);
+      }
+
+      const recMarket = this.lockedRecoveryMarket;
+      const recDir = this.lockedRecoveryDirection;
+
+      // Hardcoded 1.5x multiplier capped at 5 steps for small chunks recovery
+      const multi = 1.5;
+      const cappedLosses = Math.min(this.over3v3CurrentLosses, 5);
+      const stake = this.config.baseStake * Math.pow(multi, cappedLosses);
+
+      this.updateStatus(`OVER 3 V3: Combined Recovery (${recDir}) on ${MARKET_LABELS[recMarket] || recMarket} Stake: $${stake.toFixed(2)} (Step ${cappedLosses})...`);
+      this._placeTrade('SINGLE', recDir, stake);
       this._scheduleNext(50);
       return;
     }
@@ -8347,7 +8849,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 3 V2: No market meets Over 3 V2 conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8400,7 +8902,7 @@ class EnhancedTradeEngine {
       }
 
       this.updateStatus('OVER 3 V2: Executing continuous trade...');
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'OVER3', stake);
       this._scheduleNext(50);
       return;
@@ -8413,7 +8915,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.over3v2TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`OVER 3 V2: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8496,7 +8998,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 5 V1: No market meets Over 5 V1 conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8541,7 +9043,7 @@ class EnhancedTradeEngine {
       }
 
       this.updateStatus('OVER 5 V1: Executing continuous trade...');
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'OVER5', stake);
       this._scheduleNext(50);
       return;
@@ -8554,7 +9056,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.over5v1TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`OVER 5 V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8641,7 +9143,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 6 V2: No market meets Over 6 V2 conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8686,7 +9188,7 @@ class EnhancedTradeEngine {
       }
 
       this.updateStatus('OVER 6 V2: Executing continuous trade...');
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'OVER6', stake);
       this._scheduleNext(50);
       return;
@@ -8699,7 +9201,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.over6v2TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`OVER 6 V2: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8761,7 +9263,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('UNDER 3 V1: No market meets Under 3 V1 conditions');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8800,7 +9302,7 @@ class EnhancedTradeEngine {
       }
 
       this.updateStatus('UNDER 3 V1: Executing continuous trade...');
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'UNDER3', stake);
       this._scheduleNext(50);
       return;
@@ -8813,7 +9315,7 @@ class EnhancedTradeEngine {
         return;
       }
       const dir = this.lockedRecoveryDirection || this._getFlowBasedRecoveryDirection(this.under3v1TargetMarket);
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this.updateStatus(`UNDER 3 V1: Recovery Martingale (${dir})...`);
       this._placeTrade('SINGLE', dir, stake);
       this._scheduleNext(50);
@@ -8882,7 +9384,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('OVER 0 V1: No market meets favored conditions.');
+        this._scheduleNext(200);
         return;
       }
 
@@ -8907,7 +9409,7 @@ class EnhancedTradeEngine {
       const mktLabel = MARKET_LABELS[this.over0v1TargetMarket] || this.over0v1TargetMarket;
       this.updateStatus(`OVER 0 V1: Firing OVER 0 on ${mktLabel}...`);
       
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'OVER0', stake);
       this._scheduleNext(50);
       return;
@@ -8924,7 +9426,7 @@ class EnhancedTradeEngine {
       const mktLabel = MARKET_LABELS[this.over0v1TargetMarket] || this.over0v1TargetMarket;
       this.updateStatus(`OVER 0 V1 RECOVERY: ${tradeKey} on ${mktLabel}...`);
       
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', tradeKey, stake);
       
       this._scheduleNext(50);
@@ -8950,6 +9452,398 @@ class EnhancedTradeEngine {
     }
   }
 
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  O0_U9_HYBRID — Interchangeable OVER 0 / UNDER 9 with smart recovery
+  //  Conditions:
+  //    OVER 0:  digit 0 < 9.5%, green bar (top freq digit) > 5, top 3 digits all > 3
+  //    UNDER 9: digit 9 < 9.5%, green bar (top freq digit) < 5, top 3 digits all < 8
+  //  Recovery: Dynamically picks OVER 3 or UNDER 7 (whichever is statistically
+  //    better). Locks to one side until PL is no longer negative.
+  //    After every 3 consecutive recovery losses, pauses to re-evaluate side.
+  //  Martingale + Debt Recovery are ALWAYS active.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Evaluates the current market to decide whether OVER5 or UNDER4 is the
+   * better recovery direction. Uses multi-signal scoring:
+   *   1. Digit frequency edge (full buffer)
+   *   2. Recent momentum (last 20 ticks)
+   *   3. Streak detection (consecutive wins for each side)
+   *   4. Recency-weighted frequency (recent ticks count more)
+   * Returns 'OVER5' or 'UNDER4' (or null in strict, or {dir,score} in 'score' mode).
+   */
+  _evaluateHybridRecoveryDirection(marketSym, strict = false) {
+    const ticks = scanner.buffers[marketSym] || [];
+    if (ticks.length < 50) return strict ? null : 'OVER5';
+
+    const total = ticks.length;
+
+    // ── Signal 1: Full-buffer digit frequency edge ──
+    const counts = Array(10).fill(0);
+    for (const t of ticks) counts[t]++;
+    const over5FullPct = counts.slice(6, 10).reduce((s, c) => s + c, 0) / total * 100;
+    const under4FullPct = counts.slice(0, 4).reduce((s, c) => s + c, 0) / total * 100;
+    const over5FreqEdge = over5FullPct - 40;
+    const under4FreqEdge = under4FullPct - 40;
+
+    // ── Signal 2: Recent momentum (last 20 ticks) ──
+    const recentWindow = Math.min(20, total);
+    const recentTicks = ticks.slice(-recentWindow);
+    let recentOver5 = 0, recentUnder4 = 0;
+    for (const t of recentTicks) {
+      if (t >= 6) recentOver5++;
+      if (t <= 3) recentUnder4++;
+    }
+    const recentOver5Pct = (recentOver5 / recentWindow) * 100;
+    const recentUnder4Pct = (recentUnder4 / recentWindow) * 100;
+    const over5MomentumEdge = recentOver5Pct - 40;
+    const under4MomentumEdge = recentUnder4Pct - 40;
+
+    // ── Signal 3: Streak detection (last 10 ticks) ──
+    const streakWindow = Math.min(10, total);
+    const streakTicks = ticks.slice(-streakWindow);
+    let over5Streak = 0, under4Streak = 0;
+    // Count consecutive wins from the tail
+    for (let i = streakTicks.length - 1; i >= 0; i--) {
+      if (streakTicks[i] >= 6) over5Streak++;
+      else break;
+    }
+    for (let i = streakTicks.length - 1; i >= 0; i--) {
+      if (streakTicks[i] <= 3) under4Streak++;
+      else break;
+    }
+    const over5StreakBonus = over5Streak >= 3 ? (over5Streak * 1.5) : 0;
+    const under4StreakBonus = under4Streak >= 3 ? (under4Streak * 1.5) : 0;
+
+    // ── Signal 4: Recency-weighted frequency (exponential decay) ──
+    let over5Weighted = 0, under4Weighted = 0, totalWeight = 0;
+    for (let i = 0; i < total; i++) {
+      const weight = Math.pow(1.02, i); // Newer ticks get exponentially more weight
+      totalWeight += weight;
+      if (ticks[i] >= 6) over5Weighted += weight;
+      if (ticks[i] <= 3) under4Weighted += weight;
+    }
+    const over5WeightedEdge = (over5Weighted / totalWeight * 100) - 40;
+    const under4WeightedEdge = (under4Weighted / totalWeight * 100) - 40;
+
+    // ── Composite Score (weighted blend) ──
+    const over5Score = (over5FreqEdge * 0.25) + (over5MomentumEdge * 0.35) + (over5StreakBonus * 0.15) + (over5WeightedEdge * 0.25);
+    const under4Score = (under4FreqEdge * 0.25) + (under4MomentumEdge * 0.35) + (under4StreakBonus * 0.15) + (under4WeightedEdge * 0.25);
+
+    this.sendLog(`🔍 HYBRID: Recovery eval ${MARKET_LABELS[marketSym] || marketSym} — OVER5: ${over5Score.toFixed(1)} (freq:${over5FreqEdge.toFixed(1)} mom:${over5MomentumEdge.toFixed(1)} streak:${over5StreakBonus.toFixed(0)} wt:${over5WeightedEdge.toFixed(1)}) | UNDER4: ${under4Score.toFixed(1)} (freq:${under4FreqEdge.toFixed(1)} mom:${under4MomentumEdge.toFixed(1)} streak:${under4StreakBonus.toFixed(0)} wt:${under4WeightedEdge.toFixed(1)})`);
+
+    if (strict === 'score') {
+      const bestDir = over5Score >= under4Score ? 'OVER5' : 'UNDER4';
+      return { dir: bestDir, score: Math.max(over5Score, under4Score), over5Score, under4Score };
+    }
+
+    if (strict) {
+      if (over5Score < 2 && under4Score < 2) return null;
+    }
+
+    return over5Score >= under4Score ? 'OVER5' : 'UNDER4';
+  }
+
+  /**
+   * Checks whether a given market matches the OVER 0 conditions.
+   */
+  _hybridMatchesOver0(sym) {
+    const ticks = scanner.buffers[sym] || [];
+    if (ticks.length < 500) return false;
+
+    const counts = Array(10).fill(0);
+    for (const t of ticks) counts[t]++;
+    const freqs = counts.map((c, i) => ({ digit: i, pct: (c / ticks.length) * 100 }));
+
+    // Condition 1: digit 0 percentage < 9.5%
+    if (freqs[0].pct >= 9.5) return false;
+
+    const sorted = [...freqs].sort((a, b) => b.pct - a.pct);
+    const greenDigit = sorted[0].digit; // highest frequency digit
+
+    // Condition 2: green bar (highest freq) must be digit > 5 (i.e. 6,7,8,9)
+    if (greenDigit <= 5) return false;
+
+    // Condition 3: top 3 most frequent digits must all be > 3 (i.e. 4,5,6,7,8,9)
+    if (sorted[0].digit <= 3 || sorted[1].digit <= 3 || sorted[2].digit <= 3) return false;
+
+    return true;
+  }
+
+  /**
+   * Checks whether a given market matches the UNDER 9 conditions.
+   */
+  _hybridMatchesUnder9(sym) {
+    const ticks = scanner.buffers[sym] || [];
+    if (ticks.length < 500) return false;
+
+    const counts = Array(10).fill(0);
+    for (const t of ticks) counts[t]++;
+    const freqs = counts.map((c, i) => ({ digit: i, pct: (c / ticks.length) * 100 }));
+
+    // Condition 1: digit 9 percentage < 9.5%
+    if (freqs[9].pct >= 9.5) return false;
+
+    const sorted = [...freqs].sort((a, b) => b.pct - a.pct);
+    const greenDigit = sorted[0].digit; // highest frequency digit
+
+    // Condition 2: green bar (highest freq) must be digit < 5 (i.e. 0,1,2,3,4)
+    if (greenDigit >= 5) return false;
+
+    // Condition 3: top 3 most frequent digits must all be < 8 (i.e. 0,1,2,3,4,5,6,7)
+    if (sorted[0].digit >= 8 || sorted[1].digit >= 8 || sorted[2].digit >= 8) return false;
+
+    return true;
+  }
+
+  _executeO0U9HybridCycle() {
+    const channel = this.channels.SINGLE;
+    if (channel.active) {
+      this._scheduleNext(100);
+      return;
+    }
+
+    // ── PHASE 1: SEARCHING — scan all markets for OVER 0 or UNDER 9 conditions ──
+    if (this.hybridPhase === 'SEARCHING') {
+      // If we have a pause timer set (max 30s), respect it
+      if (this.hybridPauseUntil && Date.now() < this.hybridPauseUntil) {
+        const remaining = ((this.hybridPauseUntil - Date.now()) / 1000).toFixed(0);
+        this.updateStatus(`O0/U9 HYBRID: Paused, re-scanning in ${remaining}s...`);
+        this._scheduleNext(500);
+        return;
+      }
+      this.hybridPauseUntil = 0;
+
+      this.updateStatus('O0/U9 HYBRID: Scanning all markets for OVER 0 or UNDER 9 conditions...');
+
+      let bestMarket = null;
+      let bestSide = null;
+
+      for (const sym of MARKETS) {
+        if (this.marketStats[sym]?.quarantinedUntil > Date.now()) continue;
+
+        // Check OVER 0 first
+        if (this._hybridMatchesOver0(sym)) {
+          bestMarket = sym;
+          bestSide = 'OVER0';
+          break;
+        }
+        // Then check UNDER 9
+        if (this._hybridMatchesUnder9(sym)) {
+          bestMarket = sym;
+          bestSide = 'UNDER9';
+          break;
+        }
+      }
+
+      if (!bestMarket) {
+        this._scheduleNext(200);
+        return;
+      }
+
+      this.activeMarket = bestMarket;
+      this.hybridTradingConsecutiveTrades = 0;
+      if (this.onMarketSwitch) this.onMarketSwitch(bestMarket);
+      this.hybridTargetMarket = bestMarket;
+      this.hybridSide = bestSide;
+
+      // If we have unrecovered debt, go straight to RECOVERY instead of TRADING
+      if (this.hybridDebt > 0.001) {
+        this.hybridPhase = 'RECOVERY';
+        this.hybridRecoveryDirection = this._evaluateHybridRecoveryDirection(bestMarket) || 'OVER5';
+        this.hybridMarketEntryDebt = this.hybridDebt;
+        const mktLabel = MARKET_LABELS[bestMarket] || bestMarket;
+        this.sendLog(`🔄 O0/U9 HYBRID: Found market ${mktLabel} but debt $${this.hybridDebt.toFixed(2)} exists. Going straight to RECOVERY via ${this.hybridRecoveryDirection}.`);
+      } else {
+        this.hybridPhase = 'TRADING';
+        const mktLabel = MARKET_LABELS[bestMarket] || bestMarket;
+        const tradeLabel = bestSide === 'OVER0' ? 'OVER 0' : 'UNDER 9';
+        this.sendLog(`✅ O0/U9 HYBRID: Matched ${tradeLabel} on ${mktLabel}. Trading!`);
+      }
+    }
+
+    // ── PHASE 2: TRADING — fire on locked market, re-check conditions ──
+    if (this.hybridPhase === 'TRADING') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(200);
+        return;
+      }
+
+      const sym = this.hybridTargetMarket;
+      const currentSide = this.hybridSide;
+
+      // Re-validate conditions on current market for current side
+      const currentSideValid = currentSide === 'OVER0'
+        ? this._hybridMatchesOver0(sym)
+        : this._hybridMatchesUnder9(sym);
+
+      if (currentSideValid) {
+        // TRADING PHASE CIRCUIT BREAKER: Don't stay in one direction for too long
+        if (this.hybridTradingConsecutiveTrades >= 5) {
+          const combo = `${sym}_${currentSide}`;
+          if (!this._hybridRecoveryBlacklist) this._hybridRecoveryBlacklist = {};
+          this._hybridRecoveryBlacklist[combo] = Date.now() + 45000; // Blacklist for 45s
+          this.sendLog(`🔄 O0/U9 HYBRID: Fired 5 consecutive trades on ${MARKET_LABELS[sym] || sym} ${currentSide}. Dropping market to avoid stale trends...`);
+          this.hybridPhase = 'SEARCHING';
+          this.hybridTargetMarket = null;
+          this.hybridSide = null;
+          this._scheduleNext(200);
+          return;
+        }
+
+        // Conditions still valid — fire trade
+        const mktLabel = MARKET_LABELS[sym] || sym;
+        const tradeKey = currentSide === 'OVER0' ? 'OVER0' : 'UNDER9';
+        this.updateStatus(`O0/U9 HYBRID: Firing ${currentSide === 'OVER0' ? 'OVER 0' : 'UNDER 9'} on ${mktLabel}...`);
+
+        const stake = this._resolveTradeStake('SINGLE');
+        this.hybridTradingConsecutiveTrades++;
+        this._placeTrade('SINGLE', tradeKey, stake);
+        this._scheduleNext(50);
+        return;
+      }
+
+      // Current side lost conditions — try the OTHER side on same market
+      const otherSide = currentSide === 'OVER0' ? 'UNDER9' : 'OVER0';
+      const otherValid = otherSide === 'OVER0'
+        ? this._hybridMatchesOver0(sym)
+        : this._hybridMatchesUnder9(sym);
+
+      if (otherValid) {
+        this.hybridSide = otherSide;
+        this.hybridTradingConsecutiveTrades = 0; // Reset counter when switching sides
+        const mktLabel = MARKET_LABELS[sym] || sym;
+        this.sendLog(`🔄 O0/U9 HYBRID: Switched to ${otherSide === 'OVER0' ? 'OVER 0' : 'UNDER 9'} on ${mktLabel} (conditions flipped).`);
+        this._scheduleNext(50);
+        return;
+      }
+
+      // Both sides fail on this market
+      if (this.hybridDebt > 0.001) {
+        // We have unrecovered debt — go to RECOVERY, not SEARCHING
+        this.sendLog(`🔄 O0/U9 HYBRID: Conditions lost on ${MARKET_LABELS[sym] || sym} but debt $${this.hybridDebt.toFixed(2)} exists. Entering RECOVERY...`);
+        this.hybridPhase = 'RECOVERY';
+        this.hybridTargetMarket = null; // Force re-scan for best recovery market
+        this.hybridPauseUntil = 0;
+      } else {
+        this.sendLog(`⏸️ O0/U9 HYBRID: Conditions lost on ${MARKET_LABELS[sym] || sym}. Scanning other volatilities...`);
+        this.hybridPhase = 'SEARCHING';
+        this.hybridPauseUntil = 0;
+      }
+      this._scheduleNext(200);
+      return;
+    }
+
+    // ── PHASE 3: RECOVERY — Martingale ON, OVER5 or UNDER4 ──
+    if (this.hybridPhase === 'RECOVERY') {
+      if (!this._canFireTradeNow() || channel.active) {
+        this._scheduleNext(200);
+        return;
+      }
+
+      // If we don't have a target market for recovery (e.g. paused due to losses), search for one
+      if (!this.hybridTargetMarket) {
+        if (this.hybridPauseUntil && Date.now() < this.hybridPauseUntil) {
+          const remaining = ((this.hybridPauseUntil - Date.now()) / 1000).toFixed(0);
+          this.updateStatus(`O0/U9 HYBRID: Paused, re-scanning recovery markets in ${remaining}s...`);
+          this._scheduleNext(500);
+          return;
+        }
+        
+        // Initialize blacklist for recently-failed market+side combos
+        if (!this._hybridRecoveryBlacklist) this._hybridRecoveryBlacklist = {};
+        
+        // Build list of candidates with scores
+        const candidates = [];
+        for (const sym of MARKETS) {
+          if (this.marketStats[sym]?.quarantinedUntil > Date.now()) continue;
+          const result = this._evaluateHybridRecoveryDirection(sym, 'score');
+          if (!result) continue;
+          
+          // Check both sides separately so we can pick the best side per market
+          const over5Blacklisted = (this._hybridRecoveryBlacklist[`${sym}_OVER5`] || 0) > Date.now();
+          const under4Blacklisted = (this._hybridRecoveryBlacklist[`${sym}_UNDER4`] || 0) > Date.now();
+          
+          if (result.over5Score >= 1 && !over5Blacklisted) {
+            candidates.push({ sym, dir: 'OVER5', score: result.over5Score, blacklisted: false });
+          }
+          if (result.under4Score >= 1 && !under4Blacklisted) {
+            candidates.push({ sym, dir: 'UNDER4', score: result.under4Score, blacklisted: false });
+          }
+        }
+        
+        // Sort by score descending — best edge first
+        candidates.sort((a, b) => b.score - a.score);
+        
+        // Prefer a different market/side than what just failed (if any)
+        const lastFailedKey = this._hybridLastFailedCombo || null;
+        let bestCandidate = candidates.find(c => `${c.sym}_${c.dir}` !== lastFailedKey && c.score >= 2);
+        
+        // Fallback: accept the best candidate even if it's the same combo, but only if score >= 2
+        if (!bestCandidate) bestCandidate = candidates.find(c => c.score >= 2);
+        
+        // Last resort fallback: if no market has score >= 2, accept score >= 0.5 to avoid stalling recovery
+        if (!bestCandidate && candidates.length > 0) {
+          bestCandidate = candidates.find(c => c.score >= 0.5);
+          if (bestCandidate) {
+            this.sendLog(`⚠️ O0/U9 HYBRID: No strong edge found. Using best available: ${MARKET_LABELS[bestCandidate.sym] || bestCandidate.sym} ${bestCandidate.dir} (score: ${bestCandidate.score.toFixed(1)})`);
+          }
+        }
+        
+        if (!bestCandidate) {
+          this.updateStatus(`O0/U9 HYBRID RECOVERY: Scanning... no favorable market found yet. Debt: $${this.hybridDebt.toFixed(2)}`);
+          this._scheduleNext(200);
+          return;
+        }
+        
+        this.activeMarket = bestCandidate.sym;
+        if (this.onMarketSwitch) this.onMarketSwitch(bestCandidate.sym);
+        this.hybridTargetMarket = bestCandidate.sym;
+        this.hybridRecoveryDirection = bestCandidate.dir;
+        this.hybridMarketEntryDebt = this.hybridDebt;
+        const mktLabel = MARKET_LABELS[bestCandidate.sym] || bestCandidate.sym;
+        this.sendLog(`✅ O0/U9 HYBRID: Resuming recovery on ${mktLabel} via ${bestCandidate.dir} (score: ${bestCandidate.score.toFixed(1)}).`);
+      }
+
+      // 1. Dynamic Streak Pauser: Wait out opposing momentum instead of dropping the market
+      const ticks = scanner.buffers[this.hybridTargetMarket] || [];
+      if (ticks.length >= 3) {
+        let opposingStreak = 0;
+        for (let i = ticks.length - 1; i >= 0; i--) {
+          const t = ticks[i];
+          const isOpposing = this.hybridRecoveryDirection === 'OVER5' ? (t <= 5) : (t >= 4);
+          if (isOpposing) opposingStreak++;
+          else break;
+        }
+
+        if (opposingStreak >= 3) {
+          const mktLabel = MARKET_LABELS[this.hybridTargetMarket] || this.hybridTargetMarket;
+          this.updateStatus(`O0/U9 HYBRID RECOVERY: Paused on ${mktLabel}. Waiting for opposing streak (${opposingStreak}) to break...`);
+          this._scheduleNext(200);
+          return; // Don't fire, just wait for better tick
+        }
+      }
+
+      // Enforce hardcoded 2-level martingale step based on consecutive losses
+      if (this.hybridCurrentLosses > 0) {
+        const hold = this._getMartingaleHoldAfterStep();
+        const hardMax = 2; // Hardcoded max 2 levels for hybrid recovery
+        const targetStep = Math.min(this.hybridCurrentLosses, hardMax);
+        channel.step = hold > 0 ? Math.min(hold, targetStep) : targetStep;
+      }
+
+      const tradeKey = this.hybridRecoveryDirection || 'OVER5';
+      const mktLabel = MARKET_LABELS[this.hybridTargetMarket] || this.hybridTargetMarket;
+      const stake = this._resolveTradeStake('SINGLE');
+
+      this.updateStatus(`O0/U9 HYBRID RECOVERY: ${tradeKey} on ${mktLabel} | Stake: $${stake.toFixed(2)} | Debt: $${this.hybridDebt.toFixed(2)} (Loss #${this.hybridCurrentLosses})`);
+      this._placeTrade('SINGLE', tradeKey, stake);
+
+      this._scheduleNext(50);
+      return;
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  UNDER 9 V1 — Trade UNDER 9 on markets where digit 9 is weakest
@@ -9000,7 +9894,7 @@ class EnhancedTradeEngine {
       }
 
       if (!bestMarket) {
-        this.stop('UNDER 9 V1: No market meets conditions.');
+        this._scheduleNext(200);
         return;
       }
 
@@ -9023,7 +9917,7 @@ class EnhancedTradeEngine {
       const mktLabel = MARKET_LABELS[this.under9v1TargetMarket] || this.under9v1TargetMarket;
       this.updateStatus(`UNDER 9 V1: Firing UNDER 9 on ${mktLabel}...`);
 
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', 'UNDER9', stake);
       this._scheduleNext(50);
       return;
@@ -9040,7 +9934,7 @@ class EnhancedTradeEngine {
       const mktLabel = MARKET_LABELS[this.under9v1TargetMarket] || this.under9v1TargetMarket;
       this.updateStatus(`UNDER 9 V1 RECOVERY: ${tradeKey} on ${mktLabel}...`);
 
-      const stake = this.channels.SINGLE.stake || this.config.baseStake;
+      const stake = this._resolveTradeStake('SINGLE');
       this._placeTrade('SINGLE', tradeKey, stake);
 
       this._scheduleNext(50);
@@ -9208,13 +10102,8 @@ class EnhancedTradeEngine {
       return;
     }
 
-    // Skip 3 ticks after a loss cooldown
-    if (this.pauseTicksRemaining > 0) {
-      this.updateStatus(`Paused (${this.pauseTicksRemaining} ticks after loss)`);
-      this.pauseTicksRemaining--;
-      this._scheduleNext(1000);
-      return;
-    }
+    // Post-loss tick cooldown removed — fire immediately
+    this.pauseTicksRemaining = 0;
 
     // Evaluate market switching in real time
     this._evaluateMatchesSniperMarket();
@@ -9314,6 +10203,14 @@ class EnhancedTradeEngine {
     }
 
     // ▸▸▸ LOCK the channel IMMEDIATELY to prevent double-firing ◂◂◂
+    if (channel.contractId) {
+      if (!this._contractLedger) this._contractLedger = {};
+      this._contractLedger[channel.contractId] = {
+        channelKey, direction: channel.direction, stake: channel.stake
+      };
+      channel.contractId = null;
+    }
+
     channel.active = true;
     channel.direction = direction;
     channel.stake = resolvedStake;
@@ -9354,6 +10251,7 @@ class EnhancedTradeEngine {
     }
 
     const tradeDuration = opts.duration || 1;
+    const tradeDurationUnit = opts.durationUnit || 't';
 
     try {
       let propRes;
@@ -9365,7 +10263,10 @@ class EnhancedTradeEngine {
       ) : null;
 
       if (buffered?.id) {
-        propRes = await derivWS.sendPriorityBuy(buffered.id, buffered.price);
+        propRes = await derivWS.send(
+          { buy: buffered.id, price: buffered.price, subscribe: 1, priority: 1 },
+          { priority: true }
+        );
         if (!propRes?.buy && !propRes?.error) {
           propRes = { error: { message: 'Buffered buy failed' } };
         }
@@ -9378,14 +10279,14 @@ class EnhancedTradeEngine {
           currency: derivWS.accountInfo?.currency || 'USD',
           underlying_symbol: tradeMarket,
           duration: tradeDuration,
-          duration_unit: 't',
+          duration_unit: tradeDurationUnit,
           priority: isFastPass ? 1 : undefined,
         };
         if (barrierVal != null) proposalPayload.barrier = barrierVal;
         propRes = await derivWS.send(proposalPayload, { priority: isFastPass });
         if (!propRes.error && propRes.proposal?.id) {
           propRes = await derivWS.send(
-            { buy: propRes.proposal.id, price: propRes.proposal.ask_price, priority: isFastPass ? 1 : undefined },
+            { buy: propRes.proposal.id, price: propRes.proposal.ask_price, subscribe: 1, priority: isFastPass ? 1 : undefined },
             { priority: isFastPass }
           );
         }
@@ -9393,7 +10294,7 @@ class EnhancedTradeEngine {
 
       if (propRes.error) {
         this.sendLog(`❌ Proposal error [${direction}]: ${propRes.error.message}`);
-        this.nextAllowedTradeTime = Date.now() + 3000; // Cooldown on error to prevent tight loops
+        this.nextAllowedTradeTime = 0; // No cooldown — retry immediately
         channel.active = false;
         channel.direction = null;
         if (channelKey.startsWith('SLOT_')) this._pendingTournamentBuy = false;
@@ -9419,7 +10320,7 @@ class EnhancedTradeEngine {
       }
       if (res.error) {
         this.sendLog(`❌ Trade error [${direction}]: ${res.error.message}`);
-        this.nextAllowedTradeTime = Date.now() + 3000; // Cooldown on error to prevent tight loops
+        this.nextAllowedTradeTime = 0; // No cooldown — retry immediately
         channel.active = false;
         channel.direction = null;
         if (channelKey.startsWith('SLOT_')) this._pendingTournamentBuy = false;
@@ -9444,13 +10345,6 @@ class EnhancedTradeEngine {
         );
         this._lastVlToastTime = Date.now();
 
-        // If channel already had a contract, save it to the ledger so settlement still works
-        if (channel.contractId && channel.contractId !== res.buy.contract_id) {
-          if (!this._contractLedger) this._contractLedger = {};
-          this._contractLedger[channel.contractId] = {
-            channelKey, direction: channel.direction, stake: channel.stake
-          };
-        }
         channel.contractId = res.buy.contract_id;
         const slot = this.executionSlots?.find(s => s.channelKey === channelKey);
         if (slot) {
@@ -9506,7 +10400,12 @@ class EnhancedTradeEngine {
 
   _handleContractUpdate(msg) {
     const contract = msg.proposal_open_contract;
-    if (!contract || !contract.is_sold) return;
+    if (!contract) return;
+    
+    // Accept as settled if sold, expired, or explicitly won/lost
+    const isSettled = contract.is_sold || contract.is_expired || (contract.status && contract.status !== 'open');
+    if (!isSettled) return;
+
     const cid = contract.contract_id;
 
     if (this._settledContractIds.has(cid)) return;
@@ -9552,8 +10451,8 @@ class EnhancedTradeEngine {
       };
       delete this._contractLedger[cid];
       isLedgerSettle = true;
-      const won = contract.status === 'won';
       const profit = parseFloat(contract.profit) || 0;
+      const won = contract.status === 'won' || profit > 0;
       this.sendLog(`💸 [LEDGER SETTLE] ${won ? '✅ WIN' : '❌ LOSS'} (${won ? '+' : ''}$${profit.toFixed(2)}) — Contract ${cid}`);
     }
 
@@ -9563,8 +10462,8 @@ class EnhancedTradeEngine {
     this._openTournamentContracts.delete(cid);
 
     const direction = channel.direction;
-    const won = contract.status === 'won';
     const profit = parseFloat(contract.profit) || 0;
+    const won = contract.status === 'won' || profit > 0;
     const buyPrice = parseFloat(contract.buy_price) || 0;
     const market = contract.underlying || this.activeMarket;
 
@@ -9578,16 +10477,18 @@ class EnhancedTradeEngine {
           this.over6Debt -= profit;
           if (this.over6Debt <= 0) {
             this.over6Debt = 0;
-            this.sendLog(`✨ OVER 6: Debt fully recovered! Returning to OVER 6.`);
-            this.over6Phase = 'TRADING';
+            this.sendLog(`✨ OVER 6: Debt fully recovered! Returning to normal trading.`);
+            this.over6Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 6: Partial recovery win. Remaining Debt: $${this.over6Debt.toFixed(2)}`);
           }
         } else if (this.over6Phase === 'RECOVERY') {
           this.sendLog(`✨ OVER 6: Recovery successful.`);
-          this.over6Phase = 'TRADING';
+          this.over6Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_6');
         this.over6CurrentWins++;
@@ -9613,22 +10514,63 @@ class EnhancedTradeEngine {
         this.over6CurrentWins = 0;
       }
       riskManager.recordResult(direction, won, profit);
+    } else if (this.strategy === 'UNDER_8_V2') {
+      if (won) {
+        if (this.under8V2Phase === 'DEBT_RECOVERY' || this.under8V2Phase === 'RECOVERY') {
+          this.under8V2Debt -= profit;
+          if (this.under8V2Debt <= 0) {
+            this.under8V2Debt = 0;
+            this.sendLog(`✅ UNDER 8 V2: Debt fully recovered! Returning to original trades.`);
+            this.under8V2Phase = 'SEARCHING';
+            this.sessionConsecutiveLosses = 0;
+            this.under8V2CurrentLosses = 0;
+            this.lockedRecoveryDirection = null;
+            this.lockedRecoveryMarket = null;
+            this._syncSessionMartingaleStep(0);
+          } else {
+            this.sendLog(`⚠️ UNDER 8 V2: Partial chunk win. Remaining Debt: $${this.under8V2Debt.toFixed(2)}`);
+          }
+        } else {
+          this._onSessionWin('UNDER_8_V2');
+          this.under8V2CurrentLosses = 0;
+        }
+        this.under8V2CurrentWins++;
+      } else {
+        this.under8V2Debt = (this.under8V2Debt || 0) + Math.abs(profit);
+        
+        if (this.under8V2Phase !== 'RECOVERY' && this.under8V2Phase !== 'DEBT_RECOVERY') {
+          this.under8V2Phase = 'RECOVERY';
+          this.lockedRecoveryDirection = null;
+          this.lockedRecoveryMarket = null;
+        }
+
+        this.sendLog(`🔴 UNDER 8 V2: Loss detected. OVER 3 Rapid Recovery Active. Debt: $${this.under8V2Debt.toFixed(2)}`);
+        
+        this._onSessionLoss('UNDER_8_V2');
+        this.under8V2CurrentLosses++;
+
+        this._evaluateCircuitBreaker(this.under8V2CurrentLosses);
+        this.under8V2CurrentWins = 0;
+      }
+      riskManager.recordResult(direction, won, profit);
     } else if (this.strategy === 'UNDER_8_V1') {
       if (won) {
         if (this.under8Phase === 'DEBT_RECOVERY') {
           this.under8Debt -= profit;
           if (this.under8Debt <= 0) {
             this.under8Debt = 0;
-            this.sendLog(`✨ UNDER 8 V1: Debt fully recovered! Returning to UNDER 8.`);
-            this.under8Phase = 'TRADING';
+            this.sendLog(`✅ UNDER 8 V1: Debt fully recovered! Returning to original trades.`);
+            this.under8Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 UNDER 8 V1: Partial recovery win. Remaining Debt: $${this.under8Debt.toFixed(2)}`);
           }
         } else if (this.under8Phase === 'RECOVERY') {
           this.sendLog(`✨ UNDER 8 V1: Recovery successful.`);
-          this.under8Phase = 'TRADING';
+          this.under8Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('UNDER_8_V1');
         this.under8CurrentWins++;
@@ -9660,16 +10602,18 @@ class EnhancedTradeEngine {
           this.under7v1Debt -= profit;
           if (this.under7v1Debt <= 0) {
             this.under7v1Debt = 0;
-            this.sendLog(`✨ UNDER 7 V1: Debt fully recovered! Returning to UNDER 7.`);
-            this.under7v1Phase = 'TRADING';
+            this.sendLog(`✅ UNDER 7 V1: Debt fully recovered! Returning to original trades.`);
+            this.under7v1Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 UNDER 7 V1: Partial recovery win. Remaining Debt: $${this.under7v1Debt.toFixed(2)}`);
           }
         } else if (this.under7v1Phase === 'RECOVERY') {
           this.sendLog(`✨ UNDER 7 V1: Recovery successful.`);
-          this.under7v1Phase = 'TRADING';
+          this.under7v1Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('UNDER_7_V1');
         this.under7v1CurrentWins++;
@@ -9701,16 +10645,18 @@ class EnhancedTradeEngine {
           this.over3v1Debt -= profit;
           if (this.over3v1Debt <= 0) {
             this.over3v1Debt = 0;
-            this.sendLog(`✨ OVER 3 V1: Debt fully recovered! Returning to OVER 3.`);
-            this.over3v1Phase = 'TRADING';
+            this.sendLog(`✅ OVER 3 V1: Debt fully recovered! Returning to original trades.`);
+            this.over3v1Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 3 V1: Partial recovery win. Remaining Debt: $${this.over3v1Debt.toFixed(2)}`);
           }
         } else if (this.over3v1Phase === 'RECOVERY') {
           this.sendLog(`✨ OVER 3 V1: Recovery successful.`);
-          this.over3v1Phase = 'TRADING';
+          this.over3v1Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_3_V1');
         this.over3v1CurrentWins++;
@@ -9737,22 +10683,28 @@ class EnhancedTradeEngine {
         this.over3v1CurrentWins = 0;
       }
       riskManager.recordResult(direction, won, profit);
-    } else if (this.strategy === 'OVER_3_V2') {
+    } else if (this.strategy === 'OVER_3_V3') {
+      this._executeOver3V3Cycle();
+      return;
+    }
+    if (this.strategy === 'OVER_3_V2') {
       if (won) {
         if (this.over3v2Phase === 'DEBT_RECOVERY') {
           this.over3v2Debt -= profit;
           if (this.over3v2Debt <= 0) {
             this.over3v2Debt = 0;
-            this.sendLog(`✨ OVER 3 V2: Debt fully recovered! Returning to OVER 3.`);
-            this.over3v2Phase = 'TRADING';
+            this.sendLog(`✅ OVER 3 V2: Debt fully recovered! Returning to original trades.`);
+            this.over3v2Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 3 V2: Partial recovery win. Remaining Debt: $${this.over3v2Debt.toFixed(2)}`);
           }
         } else if (this.over3v2Phase === 'RECOVERY') {
           this.sendLog(`✨ OVER 3 V2: Recovery successful.`);
-          this.over3v2Phase = 'TRADING';
+          this.over3v2Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_3_V2');
         this.over3v2CurrentWins++;
@@ -9778,22 +10730,68 @@ class EnhancedTradeEngine {
         this.over3v2CurrentWins = 0;
       }
       riskManager.recordResult(direction, won, profit);
+    } else if (this.strategy === 'OVER_3_V3') {
+      if (won) {
+        if (this.over3v3Phase === 'DEBT_RECOVERY' || this.over3v3Phase === 'RECOVERY') {
+          this.over3v3Debt -= profit;
+          if (this.over3v3Debt <= 0) {
+            this.over3v3Debt = 0;
+            this.sendLog(`✅ OVER 3 V3: Debt fully recovered! Returning to normal trading.`);
+            this.over3v3Phase = 'SEARCHING';
+            this.sessionConsecutiveLosses = 0;
+            this.over3v3CurrentLosses = 0;
+            this.lockedRecoveryDirection = null;
+            this.lockedRecoveryMarket = null;
+            if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
+          } else {
+            this.sendLog(`⚠️ OVER 3 V3: Partial chunk win. Remaining Debt: $${this.over3v3Debt.toFixed(2)}. Keeping 1.5x capped martingale level and maintaining locked market.`);
+          }
+        } else {
+          this._onSessionWin('OVER_3_V3');
+          this.over3v3CurrentLosses = 0;
+        }
+        this.over3v3CurrentWins++;
+      } else {
+        this.over3v3Debt = (this.over3v3Debt || 0) + Math.abs(profit);
+        
+        if (this.over3v3Phase !== 'RECOVERY' && this.over3v3Phase !== 'DEBT_RECOVERY') {
+          this.over3v3Phase = 'RECOVERY';
+          this.lockedRecoveryDirection = null;
+          this.lockedRecoveryMarket = null;
+        }
+
+        this.sendLog(`🔴 OVER 3 V3: Loss detected. Fixed 1.5x Chunked Recovery Active. Debt: $${this.over3v3Debt.toFixed(2)}`);
+        
+        this._onSessionLoss('OVER_3_V3');
+        this.over3v3CurrentLosses++;
+        
+        if (this.over3v3CurrentLosses >= 5) {
+          this.sendLog(`⚠️ OVER 3 V3: Hit max martingale step 5. Resetting step to 0 while keeping debt to prevent crippling loss.`);
+          this.over3v3CurrentLosses = 0;
+        }
+
+        this._evaluateCircuitBreaker(this.over3v3CurrentLosses);
+        this.over3v3CurrentWins = 0;
+      }
+      riskManager.recordResult(direction, won, profit);
     } else if (this.strategy === 'OVER_5_V1') {
       if (won) {
         if (this.over5v1Phase === 'DEBT_RECOVERY') {
           this.over5v1Debt -= profit;
           if (this.over5v1Debt <= 0) {
             this.over5v1Debt = 0;
-            this.sendLog(`✨ OVER 5 V1: Debt fully recovered! Returning to OVER 5.`);
-            this.over5v1Phase = 'TRADING';
+            this.sendLog(`✅ OVER 5 V1: Debt fully recovered! Returning to original trades.`);
+            this.over5v1Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 5 V1: Partial recovery win. Remaining Debt: $${this.over5v1Debt.toFixed(2)}`);
           }
         } else if (this.over5v1Phase === 'RECOVERY') {
           this.sendLog(`✨ OVER 5 V1: Recovery successful.`);
-          this.over5v1Phase = 'TRADING';
+          this.over5v1Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_5_V1');
         this.over5v1CurrentWins++;
@@ -9825,16 +10823,18 @@ class EnhancedTradeEngine {
           this.over6v2Debt -= profit;
           if (this.over6v2Debt <= 0) {
             this.over6v2Debt = 0;
-            this.sendLog(`✨ OVER 6 V2: Debt fully recovered! Returning to OVER 6.`);
-            this.over6v2Phase = 'TRADING';
+            this.sendLog(`✅ OVER 6 V2: Debt fully recovered! Returning to original trades.`);
+            this.over6v2Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 6 V2: Partial recovery win. Remaining Debt: $${this.over6v2Debt.toFixed(2)}`);
           }
         } else if (this.over6v2Phase === 'RECOVERY') {
           this.sendLog(`✨ OVER 6 V2: Recovery successful.`);
-          this.over6v2Phase = 'TRADING';
+          this.over6v2Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_6_V2');
         this.over6v2CurrentWins++;
@@ -9866,16 +10866,18 @@ class EnhancedTradeEngine {
           this.under3v1Debt -= profit;
           if (this.under3v1Debt <= 0) {
             this.under3v1Debt = 0;
-            this.sendLog(`✨ UNDER 3 V1: Debt fully recovered! Returning to UNDER 3.`);
-            this.under3v1Phase = 'TRADING';
+            this.sendLog(`✅ UNDER 3 V1: Debt fully recovered! Returning to original trades.`);
+            this.under3v1Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 UNDER 3 V1: Partial recovery win. Remaining Debt: $${this.under3v1Debt.toFixed(2)}`);
           }
         } else if (this.under3v1Phase === 'RECOVERY') {
           this.sendLog(`✨ UNDER 3 V1: Recovery successful.`);
-          this.under3v1Phase = 'TRADING';
+          this.under3v1Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('UNDER_3_V1');
         this.under3v1CurrentWins++;
@@ -9907,16 +10909,18 @@ class EnhancedTradeEngine {
           this.evenV1Debt -= profit;
           if (this.evenV1Debt <= 0) {
             this.evenV1Debt = 0;
-            this.sendLog(`✨ EVEN V1: Debt fully recovered! Returning to EVEN.`);
-            this.evenV1Phase = 'TRADING';
+            this.sendLog(`✅ EVEN V1: Debt fully recovered! Returning to normal trading.`);
+            this.evenV1Phase = 'SEARCHING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 EVEN V1: Partial recovery win. Remaining Debt: $${this.evenV1Debt.toFixed(2)}`);
           }
         } else if (this.evenV1Phase === 'RECOVERY') {
           this.sendLog(`✨ EVEN V1: Recovery successful.`);
-          this.evenV1Phase = 'TRADING';
+          this.evenV1Phase = 'SEARCHING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('EVEN_V1');
         this.evenV1CurrentWins++;
@@ -9951,6 +10955,7 @@ class EnhancedTradeEngine {
             this.sendLog(`✨ ODD V1: Debt fully recovered! Returning to ODD.`);
             this.oddV1Phase = 'TRADING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 ODD V1: Partial recovery win. Remaining Debt: $${this.oddV1Debt.toFixed(2)}`);
           }
@@ -9958,6 +10963,7 @@ class EnhancedTradeEngine {
           this.sendLog(`✨ ODD V1: Recovery successful.`);
           this.oddV1Phase = 'TRADING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('ODD_V1');
         this.oddV1CurrentWins++;
@@ -9992,6 +10998,7 @@ class EnhancedTradeEngine {
             this.sendLog(`✨ OVER 0 V1: Debt fully recovered! Returning to OVER 0.`);
             this.over0v1Phase = 'TRADING_OVER_0';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 OVER 0 V1: Partial recovery win. Remaining Debt: $${this.over0v1Debt.toFixed(2)}`);
           }
@@ -9999,6 +11006,7 @@ class EnhancedTradeEngine {
           this.sendLog(`✨ OVER 0 V1: Recovery successful.`);
           this.over0v1Phase = 'TRADING_OVER_0';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('OVER_0_V1');
         this.over0v1CurrentWins++;
@@ -10034,6 +11042,7 @@ class EnhancedTradeEngine {
             this.sendLog(`✨ UNDER 9 V1: Debt fully recovered! Returning to UNDER 9.`);
             this.under9v1Phase = 'TRADING';
             this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
           } else {
             this.sendLog(`💰 UNDER 9 V1: Partial recovery win. Remaining Debt: $${this.under9v1Debt.toFixed(2)}`);
           }
@@ -10041,6 +11050,7 @@ class EnhancedTradeEngine {
           this.sendLog(`✨ UNDER 9 V1: Recovery successful.`);
           this.under9v1Phase = 'TRADING';
           this.sessionConsecutiveLosses = 0;
+          if (this._shouldResetMartingaleOnWin()) this._syncSessionMartingaleStep(0);
         }
         this._onSessionWin('UNDER_9_V1');
         this.under9v1CurrentWins++;
@@ -10065,6 +11075,94 @@ class EnhancedTradeEngine {
         this.under9v1CurrentLosses++;
         this.under9v1CurrentWins = 0;
       }
+      riskManager.recordResult(direction, won, profit);
+    } else if (this.strategy === 'O0_U9_HYBRID') {
+      if (this.hybridPhase === 'RECOVERY') {
+        this.hybridRecoveryTotalAttempts = (this.hybridRecoveryTotalAttempts || 0) + 1;
+        this._hybridTotalAttemptsNeedsReevaluation = true;
+      }
+
+      if (won) {
+        if (this.hybridPhase === 'RECOVERY') {
+          // Recovery win — subtract profit from debt
+          this.hybridDebt -= profit;
+          
+          const baseStake = this.config.baseStake || 0.35;
+          // Exit ONLY if fully cleared (<= 0). Use 0.001 to handle floating point noise.
+          if (this.hybridDebt <= 0.001) {
+            // Debt is fully cleared
+            this.hybridDebt = 0;
+            this.sendLog(`✅ O0/U9 HYBRID: Debt fully recovered! Returning to SEARCHING.`);
+            this.hybridPhase = 'SEARCHING';
+            this.hybridCurrentLosses = 0;
+            this.hybridRecoveryConsecutiveLosses = 0;
+            this.hybridRecoveryTotalAttempts = 0;
+            this.hybridRecoveryDirection = null;
+            this._hybridNeedsReevaluation = false;
+            this.sessionConsecutiveLosses = 0;
+            this._syncSessionMartingaleStep(0);
+          } else {
+            // Partial win — still have significant debt remaining, stay in RECOVERY
+            this.hybridRecoveryConsecutiveLosses = 0; // reset consecutive recovery losses on win
+            this.sendLog(`💰 O0/U9 HYBRID: Recovery win! Remaining Debt: $${this.hybridDebt.toFixed(2)}`);
+          }
+        } else {
+          // Normal trading win
+          this.hybridCurrentLosses = 0;
+        }
+        this._onSessionWin('O0_U9_HYBRID');
+        this.hybridCurrentWins++;
+      } else {
+        // LOSS
+        const lossAmt = Math.abs(profit);
+        this.hybridDebt = (this.hybridDebt || 0) + lossAmt;
+
+        if (this.hybridPhase !== 'RECOVERY') {
+          // First loss from TRADING → enter RECOVERY
+          this.hybridPhase = 'RECOVERY';
+          this.hybridRecoveryConsecutiveLosses = 0;
+          this.hybridRecoveryTotalAttempts = 0;
+          this.hybridMarketEntryDebt = this.hybridDebt;
+          // Dynamically evaluate OVER5 vs UNDER4
+          this.hybridRecoveryDirection = this._evaluateHybridRecoveryDirection(this.hybridTargetMarket);
+          this._hybridNeedsReevaluation = false;
+          this.sendLog(`🔴 O0/U9 HYBRID: Loss on ${this.hybridSide === 'OVER0' ? 'OVER 0' : 'UNDER 9'}. Recovery via ${this.hybridRecoveryDirection}. Debt: $${this.hybridDebt.toFixed(2)}`);
+        } else {
+          // Loss during recovery — accumulate debt and track consecutive recovery losses
+          this.hybridRecoveryConsecutiveLosses++;
+          this._hybridNeedsReevaluation = true; // flag for re-evaluation at next multiple of 3
+          this.sendLog(`🔴 O0/U9 HYBRID: Recovery loss #${this.hybridRecoveryConsecutiveLosses} (${this.hybridRecoveryDirection}). Debt: $${this.hybridDebt.toFixed(2)}`);
+        }
+
+        this._onSessionLoss('O0_U9_HYBRID');
+        this.hybridCurrentLosses++;
+        this.hybridCurrentWins = 0;
+
+        this._evaluateCircuitBreaker(this.hybridCurrentLosses);
+      }
+
+      // Track local hybrid profit and check Hybrid Take Profit
+      this.hybridSessionProfit = (this.hybridSessionProfit || 0) + profit;
+      const hybridTp = Number(this.config.hybridTakeProfit) || 0;
+      if (hybridTp > 0 && this.hybridSessionProfit >= hybridTp && this.hybridDebt <= 0.001) {
+        // Only trigger local TP if debt is fully cleared — never wipe unrecovered debt
+        this.sendLog(`🎉 O0/U9 HYBRID: Local Take Profit reached (+$${this.hybridSessionProfit.toFixed(2)} / +$${hybridTp.toFixed(2)}). Clearing everything and starting afresh!`);
+        this.hybridSessionProfit = 0;
+        this.hybridTargetMarket = null;
+        this.hybridPhase = 'SEARCHING';
+        this.hybridDebt = 0;
+        this.hybridMarketEntryDebt = 0;
+        this.hybridCurrentLosses = 0;
+        this.hybridRecoveryConsecutiveLosses = 0;
+        this.hybridRecoveryTotalAttempts = 0;
+        this.hybridRecoveryDirection = null;
+        this._hybridNeedsReevaluation = false;
+        this._hybridTotalAttemptsNeedsReevaluation = false;
+        this._syncSessionMartingaleStep(0);
+        
+        if (this.onHybridSoftReset) this.onHybridSoftReset();
+      }
+
       riskManager.recordResult(direction, won, profit);
     } else if (this.strategy === 'RANDOM_PICKER') {
       if (won) {
@@ -10094,10 +11192,8 @@ class EnhancedTradeEngine {
             this.sendLog(`⚠️ Market ${MARKET_LABELS[market] || market} paused ${Math.round(MARKET_QUARANTINE_MS / 1000)}s after 2 losses.`);
           }
         }
-        // Stealth: Randomized Cooldown
-        const randomTicks = Math.floor(Math.random() * 10) + 12; // 12 to 21 ticks
-        this.pauseTicksRemaining = randomTicks; 
-        this.sendLog(`⏱️ Cooldown after loss: Pausing entry for next ${randomTicks} ticks (Stealth).`);
+        // Stealth cooldown removed — fire next trade immediately
+        this.pauseTicksRemaining = 0;
       }
       riskManager.recordResult(direction, won, profit);
     } else if (this.strategy === 'MATCH_DIFF') {
@@ -10123,10 +11219,8 @@ class EnhancedTradeEngine {
           this.matchDiffStakeStep = 1;
         }
 
-        // Stealth: Randomized Cooldown
-        const randomTicks = Math.floor(Math.random() * 10) + 12;
-        this.pauseTicksRemaining = randomTicks;
-        this.sendLog(`⏱️ Cooldown after loss: Pausing entry for next ${randomTicks} ticks (Stealth).`);
+        // Stealth cooldown removed — fire next trade immediately
+        this.pauseTicksRemaining = 0;
       }
       riskManager.recordResult(direction, won, profit);
     } else {
@@ -10268,6 +11362,10 @@ class EnhancedTradeEngine {
       channel.step = this._sessionMartingaleStep || 0;
     } else if (won) {
       channel.consecutiveLosses = 0;
+      // Reset Rise/Fall loss counter on win
+      if (direction === 'RISE' || direction === 'FALL') {
+        this._rfConsecutiveLosses = 0;
+      }
       if (this.config.recoveryEnabled !== false) {
         if (this._shouldResetMartingaleOnWin()) {
           this._resetChannelMartingale(channelKey);
@@ -10291,7 +11389,27 @@ class EnhancedTradeEngine {
         const hold = this._getMartingaleHoldAfterStep();
         const prev = channel.step || 0;
         channel.step = hold > 0 ? Math.min(hold, prev + 1) : prev + 1;
-        channel.stake = this._getMartingaleStake(channel);
+        
+        if (direction === 'RISE' || direction === 'FALL') {
+          // Hardcoded XML Recovery for Rise/Fall
+          const lossAmount = Math.abs(profit);
+          channel.stake = Number((channel.stake + (lossAmount * 1.071)).toFixed(2));
+
+          // Track consecutive Rise/Fall losses and trigger pause at 3
+          this._rfConsecutiveLosses = (this._rfConsecutiveLosses || 0) + 1;
+          if (this._rfConsecutiveLosses >= 3) {
+            const pauseTicks = 3 + Math.floor(Math.random() * 3); // 3, 4, or 5
+            this._rfPauseTicksRemaining = pauseTicks;
+            this._rfWaitingForReversal = false; // Will be set true after pause ends
+            this._rfPauseDirection = direction;
+            this.sendLog(`⚠️ Rise/Fall: 3 consecutive losses — pausing for ${pauseTicks} ticks then watching for reversal.`);
+            // After the pause ticks count down, _executeRiseFallCycle will flip to reversal-watch
+            // We do NOT reset _rfConsecutiveLosses here; it resets on the next win
+          }
+        } else {
+          channel.stake = this._getMartingaleStake(channel);
+        }
+
         const capNote = this._getMaxStakeCap() != null ? `, cap $${this._getMaxStakeCap().toFixed(2)}` : '';
         this.sendLog(
           `❌ [${channelKey}] LOSS $${profit.toFixed(2)} — next stake $${channel.stake.toFixed(2)} (step ${channel.step}${capNote})`
@@ -10414,7 +11532,7 @@ class EnhancedTradeEngine {
     if (this.onTradeUpdate) this.onTradeUpdate(trade);
 
 
-    if (this.running) this._scheduleNext(cooldownMs);
+    if (this.running) this._scheduleNext(0);
   }
 
   _executeOmnisniperCycle() {
@@ -10675,7 +11793,7 @@ class EnhancedTradeEngine {
         }
 
         this.updateStatus('Executing');
-        this._placeTrade('SINGLE', 'DIFF', this.channels.SINGLE.stake || this.config.baseStake, finalTarget.toString());
+        this._placeTrade('SINGLE', 'DIFF', this._resolveTradeStake('SINGLE'), finalTarget.toString());
         return;
       }
 
@@ -10850,13 +11968,8 @@ class EnhancedTradeEngine {
       return;
     }
 
-    // Filter 2 — Cooldown after loss (wait 3 ticks before next entry)
-    if (this.pauseTicksRemaining > 0) {
-      this.updateStatus(`Paused (${this.pauseTicksRemaining} ticks after loss)`);
-      this.pauseTicksRemaining--;
-      this._scheduleNext(1500);
-      return;
-    }
+    // Post-loss tick cooldown removed — fire immediately
+    this.pauseTicksRemaining = 0;
 
     const ticks = scanner.buffers[this.activeMarket]?.slice(-5);
     if (!ticks || ticks.length < 5) {
@@ -10920,7 +12033,24 @@ class EnhancedTradeEngine {
   }
 
   updateConfig(config) {
-    this.config = config;
+    if (!this.config) {
+      this.config = config;
+      return;
+    }
+    // Merge new values into existing config — never clobber start()-processed fields blindly
+    const prev = this.config;
+    for (const key of Object.keys(config)) {
+      prev[key] = config[key];
+    }
+    // Re-apply mandatory overrides from start()
+    prev.baseStake = this._resolveStake(prev.baseStake || 0.35);
+    if (prev.baseStake < 0.35) prev.baseStake = 0.35;
+    prev.freezeMartingaleAfterLosses = 0;
+    prev.maxMartingaleStepWhenLosing = 0;
+    // Ensure OU/EO winning always has recovery on
+    if (this.strategy === 'OU_WINNING' || this.strategy === 'EO_WINNING') {
+      prev.recoveryEnabled = true;
+    }
   }
 }
 

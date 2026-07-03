@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Play, Square, Zap, Link2 } from 'lucide-react';
+import { Play, Square, Zap, Link2, Pause } from 'lucide-react';
 import { motion } from 'framer-motion';
 import useTradeStore from '../store/useTradeStore';
 import useConnectionStore from '../store/useConnectionStore';
@@ -11,10 +11,12 @@ import { getConservativeEngineOverrides } from '../lib/tradeAnalytics.js';
 import derivWS from '../lib/derivWS';
 import { MARKET_LABELS } from '../lib/marketScanner';
 import useAccountStore from '../store/useAccountStore';
+import toast from 'react-hot-toast';
 
 export default function BotControl() {
   const navigate = useNavigate();
   const botRunning = useTradeStore(s => s.botRunning);
+  const botPaused = useTradeStore(s => s.botPaused);
   const botStatus = useTradeStore(s => s.botStatus);
   const stopReason = useTradeStore(s => s.stopReason);
   const status = useConnectionStore(s => s.status);
@@ -23,10 +25,12 @@ export default function BotControl() {
   const config = useConfigStore();
   
   const setBotRunning = useTradeStore(s => s.setBotRunning);
+  const setBotPaused = useTradeStore(s => s.setBotPaused);
   const setStopReason = useTradeStore(s => s.setStopReason);
   const setActiveMarket = useConnectionStore(s => s.setActiveMarket);
   const addOrUpdateTrade = useTradeStore(s => s.addOrUpdateTrade);
   const resetSession = useTradeStore(s => s.resetSession);
+  const clearPersistedLog = useTradeStore(s => s.clearPersistedLog);
   const setBotStatus = useTradeStore(s => s.setBotStatus);
   const setLiveAnalysisBoard = useTradeStore(s => s.setLiveAnalysisBoard);
 
@@ -40,29 +44,110 @@ export default function BotControl() {
   useEffect(() => {
     if (botRunning) {
       tradeEngine.onTradeUpdate = (trade) => addOrUpdateTrade(trade);
-      tradeEngine.onBotStop = (reason) => { 
+      tradeEngine.onBotStop = (reason) => {
+        if (reason && reason !== 'User stopped') toast.error(reason, { duration: 4000, position: 'top-center' }); 
         setStopReason(reason); 
         setBotStatus(''); 
         setBotRunning(false);
       };
       tradeEngine.onMarketSwitch = (market) => setActiveMarket(market);
-      tradeEngine.onStatusChange = (statusStr) => setBotStatus(statusStr);
+      tradeEngine.onStatusChange = (statusStr) => {
+        setBotStatus(statusStr);
+        if (statusStr.includes('??') || statusStr.includes('??') || statusStr.includes('CIRCUIT BREAKER')) {
+          toast(statusStr, { icon: statusStr.includes('??') ? '??' : '??', duration: 4000, position: 'top-center' });
+        }
+      };
     }
   }, [botRunning, addOrUpdateTrade, setStopReason, setBotStatus, setActiveMarket, setBotRunning]);
+
+  useEffect(() => {
+    if (botRunning) {
+      const baseStake = config.minStakeOnly
+        ? Math.max(0.35, Number(config.baseStake) || 0.35)
+        : config.baseStake;
+
+      tradeEngine.updateConfig({
+        strategy: config.strategy,
+        baseStake,
+        maxSteps: config.maxSteps,
+        maxMartingaleStep: config.maxMartingaleStep ?? config.maxSteps ?? 0,
+        recoveryPayoutRate: config.recoveryPayoutRate ?? 0.92,
+        martMultiplier: config.martMultiplier,
+        martingaleHoldAfterStep: config.martingaleHoldAfterStep ?? 0,
+        recoveryEnabled: config.recoveryEnabled,
+        resetMartingaleOnWin: config.resetMartingaleOnWin !== false,
+        antiMartEnabled: config.antiMartEnabled,
+        antiMartMultiplier: config.antiMartMultiplier,
+        switchAfterLosses: config.switchAfterLosses,
+        stopLoss: config.stopLoss || 0,
+        takeProfit: config.takeProfit || 0,
+        takeProfitType: config.takeProfitType || 'currency',
+        cooldownMs: config.cooldownMs,
+        entryConfirmEnabled: config.entryConfirmEnabled !== false,
+        entryConfirmRandom: config.entryConfirmRandom !== false,
+        entryConfirmMinSec: config.entryConfirmMinSec ?? 20,
+        entryConfirmMaxSec: config.entryConfirmMaxSec ?? 25,
+        entryConfirmMs: config.entryConfirmMs ?? 0,
+        minConfidence: config.minConfidence,
+        virtualLossesToWait: config.virtualLossesToWait,
+        autoSwitchMarkets: config.autoSwitchMarkets,
+        maxStakeCap: config.maxStakeCap,
+        maxStakeMultiplier: config.maxStakeMultiplier,
+        maxTradesPerMinute: config.maxTradesPerMinute,
+        recoveryLossTarget: config.recoveryLossTarget,
+        maxLossStreak: config.maxLossStreak ?? 0,
+        maxLossStreakStopEnabled: config.maxLossStreakStopEnabled === true,
+        lossStreakPauseMs: config.lossStreakPauseMs ?? 12000,
+        entryGateMinWin: config.entryGateMinWin ?? 49,
+        entryGateTightenPerLoss: config.entryGateTightenPerLoss ?? 2,
+        entryGateMinConv: config.entryGateMinConv ?? 45,
+        entryGateMinEdge: config.entryGateMinEdge ?? 102,
+        entryGateMinOppEnd: config.entryGateMinOppEnd ?? 4,
+        entryGateMinOppStreak: config.entryGateMinOppStreak ?? 4,
+        freezeMartingaleAfterLosses: config.freezeMartingaleAfterLosses,
+        maxMartingaleStepWhenLosing: config.maxMartingaleStepWhenLosing,
+        rollingWinRateKillEnabled: config.rollingWinRateKillEnabled === true,
+        rollingWinRateFloor: config.rollingWinRateFloor ?? 48,
+        rollingWinRateWindow: config.rollingWinRateWindow ?? 50,
+        rollingWinRateMinTrades: config.rollingWinRateMinTrades ?? 20,
+        sessionDrawdownStopPct: config.sessionDrawdownStopPct ?? 0,
+        cascadePauseAt: config.cascadePauseAt ?? 0,
+        cascadeFreezeAt: config.cascadeFreezeAt ?? 0,
+        cascadeStopAt: config.cascadeStopAt ?? 0,
+        cascadePauseMs: config.cascadePauseMs ?? 8000,
+        conservativeMode: config.conservativeMode === true,
+        minStakeOnly: config.minStakeOnly === true,
+        requireExhaustionGate: config.requireExhaustionGate !== false,
+        invertTradeDirection: config.invertTradeDirection === true,
+        ...getConservativeEngineOverrides(config)
+      });
+    }
+  }, [botRunning, config]);
 
   const handleToggle = useCallback(() => {
     resetGlobalRiskMatrix();
     if (botRunning) {
       tradeEngine.stop('User stopped');
       setBotRunning(false);
+      setBotPaused(false);
     } else {
       if (status !== 'authorized') return;
       resetSession();
 
       tradeEngine.onTradeUpdate = (trade) => addOrUpdateTrade(trade);
-      tradeEngine.onBotStop = (reason) => { setStopReason(reason); setBotStatus(''); };
+      tradeEngine.onHybridSoftReset = () => {
+        resetSession();
+        if (clearPersistedLog) clearPersistedLog();
+      };
+      tradeEngine.onBotStop = (reason) => {
+        if (reason && reason !== 'User stopped') toast.error(reason, { duration: 4000, position: 'top-center' }); setStopReason(reason); setBotStatus(''); };
       tradeEngine.onMarketSwitch = (market) => setActiveMarket(market);
-      tradeEngine.onStatusChange = (botStatus) => setBotStatus(botStatus);
+      tradeEngine.onStatusChange = (statusStr) => {
+        setBotStatus(statusStr);
+        if (statusStr.includes('??') || statusStr.includes('??') || statusStr.includes('CIRCUIT BREAKER')) {
+          toast(statusStr, { icon: statusStr.includes('??') ? '??' : '??', duration: 4000, position: 'top-center' });
+        }
+      };
 
       const conservative = getConservativeEngineOverrides(config);
       const baseStake = config.minStakeOnly
@@ -73,7 +158,11 @@ export default function BotControl() {
         strategy: config.strategy,
         baseStake,
         maxSteps: config.maxSteps,
-        maxMartingaleStep: config.maxMartingaleStep ?? config.maxSteps ?? 0,
+        hybridMaxSteps: config.hybridMaxSteps,
+        hybridTakeProfit: config.hybridTakeProfit,
+        hybridStopLossCurrency: config.hybridStopLossCurrency,
+        hybridStopLossSteps: config.hybridStopLossSteps,
+        maxMartingaleStep: (config.maxMartingaleStep > 0) ? config.maxMartingaleStep : (config.maxSteps || 0),
         recoveryPayoutRate: config.recoveryPayoutRate ?? 0.92,
         martMultiplier: config.martMultiplier,
         martingaleHoldAfterStep: config.martingaleHoldAfterStep ?? 0,
@@ -151,25 +240,61 @@ export default function BotControl() {
       CONNECT ACCOUNT
     </motion.button>
   ) : (
-    <motion.button
-      whileTap={{ scale: 0.98 }}
-      onClick={handleToggle}
-      style={{
-        width: '100%', padding: '14px 0', borderRadius: 12, border: 'none',
-        cursor: canStart || botRunning ? 'pointer' : 'not-allowed',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-        background: botRunning ? 'var(--crimson)' : 'var(--cyan)', 
-        color: botRunning ? '#fff' : '#000', fontSize: 16, fontWeight: 800, letterSpacing: '1px',
-        boxShadow: 'none',
-        transition: 'background 0.3s'
-      }}
-    >
+    <div style={{ display: 'flex', gap: 10, width: '100%' }}>
       {botRunning ? (
-        <><Square size={18} fill="#fff" /> STOP TRADING</>
+        <>
+          <motion.button
+            whileTap={{ scale: 0.98 }}
+            onClick={() => {
+              if (botPaused) {
+                tradeEngine.resume();
+                setBotPaused(false);
+              } else {
+                tradeEngine.pause();
+                setBotPaused(true);
+              }
+            }}
+            style={{
+              flex: 1, padding: '14px 0', borderRadius: 12, border: 'none',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              background: botPaused ? 'var(--cyan)' : 'var(--amber)', 
+              color: '#000', fontSize: 16, fontWeight: 800, letterSpacing: '1px',
+              transition: 'background 0.3s'
+            }}
+          >
+            {botPaused ? <><Play size={18} fill="#000" /> RESUME</> : <><Pause size={18} fill="#000" /> PAUSE</>}
+          </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.98 }}
+            onClick={handleToggle}
+            style={{
+              flex: 1, padding: '14px 0', borderRadius: 12, border: 'none',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              background: 'var(--crimson)', 
+              color: '#fff', fontSize: 16, fontWeight: 800, letterSpacing: '1px',
+              transition: 'background 0.3s'
+            }}
+          >
+            <Square size={18} fill="#fff" /> STOP TRADING
+          </motion.button>
+        </>
       ) : (
-        <><Play size={18} fill="#000" /> START TRADING</>
+        <motion.button
+          whileTap={{ scale: 0.98 }}
+          onClick={handleToggle}
+          style={{
+            width: '100%', padding: '14px 0', borderRadius: 12, border: 'none',
+            cursor: canStart ? 'pointer' : 'not-allowed',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+            background: 'var(--cyan)', 
+            color: '#000', fontSize: 16, fontWeight: 800, letterSpacing: '1px',
+            transition: 'background 0.3s'
+          }}
+        >
+          <Play size={18} fill="#000" /> START TRADING
+        </motion.button>
       )}
-    </motion.button>
+    </div>
   );
 
   return (
@@ -214,3 +339,4 @@ export default function BotControl() {
     </>
   );
 }
+

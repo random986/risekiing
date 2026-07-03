@@ -122,14 +122,16 @@ class TradeEngine {
 
     const numericStake = Number(Number(stake).toFixed(2)) || 0.35;
 
+    const isRiseFall = direction === 'RISE' || direction === 'FALL';
+
     const proposalPayload = {
       proposal: 1,
       amount: numericStake,
       basis: 'stake',
       contract_type: spec.contract_type,
       currency: derivWS.accountInfo?.currency || 'USD',
-      duration: 1,
-      duration_unit: 't',
+      duration: isRiseFall ? (this.config.riseFallDuration || 30) : 1,
+      duration_unit: isRiseFall ? (this.config.riseFallDurationUnit || 's') : 't',
       underlying_symbol: this.activeMarket,
     };
     if (spec.barrier !== null && spec.barrier !== undefined) proposalPayload.barrier = String(spec.barrier);
@@ -248,7 +250,14 @@ class TradeEngine {
       if (this.config.recoveryEnabled) {
         if (channel.step < maxSteps) {
           channel.step++;
-          channel.stake = riskManager.calculateStake(this.config, channel.step, 0);
+          
+          if (direction === 'RISE' || direction === 'FALL') {
+            const lossAmount = Math.abs(profit);
+            channel.stake = Number((channel.stake + (lossAmount * 1.071)).toFixed(2));
+          } else {
+            channel.stake = riskManager.calculateStake(this.config, channel.step, 0);
+          }
+          
           console.log(`❌ LOSS [${direction}] $${profit.toFixed(2)} | Martingale step ${channel.step}/${maxSteps} → next trade at $${channel.stake}`);
         } else {
           // Reached max steps, reset to base

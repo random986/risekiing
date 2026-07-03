@@ -18,7 +18,7 @@
   --text-secondary: #333333;
   --text-muted: #555555;
   --cyan: #ff444f; /* Replaced with Deriv Pink */
-  --emerald: #ff444f; /* Replaced with Deriv Pink */
+  --emerald: #00e676; /* Restored to Green */
   --amber: #00a8ff; /* Replaced yellow with bluish color */
   --crimson: #ff444f;
   --success: #00e676;
@@ -41,7 +41,7 @@
   --text-secondary: #c2c2c2;
   --text-muted: #999999;
   --cyan: #ff444f; /* Replaced with Deriv Pink */
-  --emerald: #ff444f; /* Replaced with Deriv Pink */
+  --emerald: #00e676; /* Restored to Green */
   --amber: #00a8ff; /* Replaced yellow with bluish color */
   --crimson: #ff444f;
   --success: #00e676;
@@ -60,7 +60,7 @@ html, body {
   height: 100%;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: 'DM Sans', sans-serif;
+  font-family: 'Product Sans', 'Google Sans', sans-serif;
   font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
@@ -112,7 +112,7 @@ html, body {
 }
 
 .font-display {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Product Sans', 'Google Sans', sans-serif;
 }
 
 /* Pulse animation for live indicators */

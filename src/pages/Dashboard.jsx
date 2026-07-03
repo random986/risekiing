@@ -195,6 +195,18 @@ export default function Dashboard() {
               UNDER 8 V1
             </button>
             <button
+              onClick={() => config.updateConfig({ strategy: 'UNDER_8_V2' })}
+              style={{
+                background: config.strategy === 'UNDER_8_V2' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                border: config.strategy === 'UNDER_8_V2' ? 'none' : '1px solid var(--border)',
+                color: config.strategy === 'UNDER_8_V2' ? '#000' : 'var(--text-muted)',
+                fontSize: 11, fontWeight: 700, padding: '4px 10px',
+                borderRadius: 4, cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              UNDER 8 V2
+            </button>
+            <button
               onClick={() => config.updateConfig({ strategy: 'UNDER_7_V1' })}
               style={{
                 background: config.strategy === 'UNDER_7_V1' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
@@ -229,6 +241,18 @@ export default function Dashboard() {
                 }}
               >
                 OVER 3 V2
+              </button>
+              <button
+                onClick={() => config.updateConfig({ strategy: 'OVER_3_V3' })}
+                style={{
+                  background: config.strategy === 'OVER_3_V3' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                  border: config.strategy === 'OVER_3_V3' ? 'none' : '1px solid var(--border)',
+                  color: config.strategy === 'OVER_3_V3' ? '#000' : 'var(--text-muted)',
+                  fontSize: 11, fontWeight: 700, padding: '4px 10px',
+                  borderRadius: 4, cursor: 'pointer', transition: 'all 0.2s'
+                }}
+              >
+                OVER 3 V3 (Fixed 1.5x)
               </button>
             <button
               onClick={() => config.updateConfig({ strategy: 'OVER_5_V1' })}
@@ -303,6 +327,18 @@ export default function Dashboard() {
               UNDER 9 V1
             </button>
             <button
+              onClick={() => config.updateConfig({ strategy: 'O0_U9_HYBRID' })}
+              style={{
+                background: config.strategy === 'O0_U9_HYBRID' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                border: config.strategy === 'O0_U9_HYBRID' ? 'none' : '1px solid var(--border)',
+                color: config.strategy === 'O0_U9_HYBRID' ? '#000' : 'var(--text-muted)',
+                fontSize: 11, fontWeight: 700, padding: '4px 10px',
+                borderRadius: 4, cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              O0/U9 HYBRID
+            </button>
+            <button
               onClick={() => config.updateConfig({ strategy: 'UNDER_3_V1' })}
               style={{
                 background: config.strategy === 'UNDER_3_V1' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
@@ -325,6 +361,30 @@ export default function Dashboard() {
               }}
             >
               RANDOM PICKER
+            </button>
+            <button
+              onClick={() => config.updateConfig({ strategy: 'RISE' })}
+              style={{
+                background: config.strategy === 'RISE' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                border: config.strategy === 'RISE' ? 'none' : '1px solid var(--border)',
+                color: config.strategy === 'RISE' ? '#000' : 'var(--text-muted)',
+                fontSize: 11, fontWeight: 700, padding: '4px 10px',
+                borderRadius: 4, cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              RISE
+            </button>
+            <button
+              onClick={() => config.updateConfig({ strategy: 'FALL' })}
+              style={{
+                background: config.strategy === 'FALL' ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                border: config.strategy === 'FALL' ? 'none' : '1px solid var(--border)',
+                color: config.strategy === 'FALL' ? '#000' : 'var(--text-muted)',
+                fontSize: 11, fontWeight: 700, padding: '4px 10px',
+                borderRadius: 4, cursor: 'pointer', transition: 'all 0.2s'
+              }}
+            >
+              FALL
             </button>
           </div>
         </div>
@@ -390,3 +450,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

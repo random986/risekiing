@@ -30,6 +30,7 @@ const useTradeStore = create((set, get) => ({
   history: [],
   activeTrades: 0,
   botRunning: false,
+  botPaused: false,
   botStatus: '',
   stopReason: null,
   sessionStats: { wins: 0, losses: 0, pnl: 0, trades: 0 },
@@ -70,8 +71,9 @@ const useTradeStore = create((set, get) => ({
   }),
 
   setActiveTrades: (n) => set({ activeTrades: n }),
-  setBotRunning: (running) => set({ botRunning: running, stopReason: running ? null : get().stopReason }),
-  setStopReason: (reason) => set({ stopReason: reason, botRunning: false }),
+  setBotRunning: (running) => set({ botRunning: running, botPaused: false, stopReason: running ? null : get().stopReason }),
+  setBotPaused: (paused) => set({ botPaused: paused }),
+  setStopReason: (reason) => set({ stopReason: reason, botRunning: false, botPaused: false }),
   setBotStatus: (botStatus) => set({ botStatus }),
   setLiveAnalysisBoard: (liveAnalysisBoard) => set({ liveAnalysisBoard }),
 

@@ -66,6 +66,8 @@ export const useRealMarketStore = create((set, get) => ({
   killSwitchActive: false,
   consecutiveLosses: 0,
   pauseUntil: 0,
+  dailyLossStop: 0,
+  dailyProfitTarget: 0,
 
   // News
   newsEvents: [],

@@ -10,6 +10,7 @@ import scanner from '../lib/marketScanner';
 import { seedMarketHistory, registerMarketTickHandler } from '../lib/marketWarmup';
 import { generatePKCE } from '../lib/pkce';
 import { fmtMoney, num } from '../lib/format';
+import { APP_ID, getRedirectUri } from '../config';
 
 const NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Synthetic Markets' },
@@ -53,8 +54,8 @@ export default function Header({ bannerOffset = 0 }) {
 
       const params = new URLSearchParams({
         response_type: 'code',
-        client_id: '33h51PQlu5tsWflEmmoxW',
-        redirect_uri: 'https://derivprinter.beexelgraphics.com',
+        client_id: APP_ID,
+        redirect_uri: getRedirectUri(),
         scope: 'trade',
         state: state,
         code_challenge: codeChallenge,

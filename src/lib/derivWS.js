@@ -6,8 +6,8 @@
    ══════════════════════════════════════════════════════════════ */
 
 import useConnectionStore from '../store/useConnectionStore.js';
+import { APP_ID } from '../config.js';
 
-const APP_ID = '33A2vaP4EPmALB4zQaRIp';
 const API_BASE = 'https://api.derivws.com/trading/v1/options';
 
 class DerivWebSocket {
@@ -91,7 +91,7 @@ class DerivWebSocket {
     if (!token) return;
 
     // If we're already connecting or connected to this same account, do nothing
-    if (this.token === token && this.accountId === accountId && (this.status === 'connecting' || this.status === 'authorized')) {
+    if (this.token === token && this.accountId === accountId && (this.status === 'connecting' || this.status === 'connected' || this.status === 'authorized')) {
       console.log(`[derivWS] Already ${this.status} to ${accountId}, skipping reconnect.`);
       return;
     }
@@ -175,7 +175,7 @@ class DerivWebSocket {
       return;
     }
 
-    const wsUrl = `wss://ws.binaryws.com/websockets/v3?app_id=1089`;
+    const wsUrl = `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`;
     console.log('[derivWS] Connecting to legacy Deriv WS:', wsUrl);
 
     try {
@@ -394,7 +394,7 @@ class DerivWebSocket {
 
   _startPing() {
     this._stopPing();
-    const intervalMs = 10000;
+    const intervalMs = 30000;
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ ping: 1 }));

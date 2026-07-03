@@ -5,7 +5,7 @@ import { Activity } from 'lucide-react';
 
 export default function TickAnalysis() {
   const [ticks, setTicks] = useState([]);
-  const [windowSize, setWindowSize] = useState(1000);
+  const [windowSize, setWindowSize] = useState(500);
   const [activeMarket, setActiveMarket] = useState(enhancedTradeEngine.activeMarket);
   const [strategy, setStrategy] = useState(enhancedTradeEngine.strategy);
 

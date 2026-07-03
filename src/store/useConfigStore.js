@@ -26,11 +26,7 @@ function loadConfig() {
       if (parsed.resetMartingaleOnWin === false && Number(parsed.takeProfit) > 0) {
         parsed.resetMartingaleOnWin = true;
       }
-      // Unlimited martingale by default — clear legacy caps that halved stakes (44→22→11…)
-      parsed.maxStakeCap = 0;
-      parsed.maxStakeMultiplier = 0;
-      parsed.maxMartingaleStep = 0;
-      parsed.maxSteps = 0;
+      // Legacy caps removed: maxStakeCap and maxSteps are now persisted.
       if (Number(parsed.martingaleHoldAfterStep) > 0) parsed.martingaleHoldAfterStep = 0;
       return parsed;
     }
@@ -42,6 +38,10 @@ const defaults = {
   strategy: 'MATCH_DIFF',      // 'MATCH_DIFF' | 'MATCHES' | 'DIFF'
   baseStake: 0.35,
   maxSteps: 0,
+  hybridMaxSteps: 0,
+  hybridTakeProfit: 0,
+  hybridStopLossCurrency: 0,
+  hybridStopLossSteps: 0,
   maxMartingaleStep: 0,
   freezeMartingaleAfterLosses: 0,
   maxMartingaleStepWhenLosing: 0,
@@ -100,6 +100,9 @@ const defaults = {
   invertTradeDirection: false, // Always flip OVER↔UNDER and EVEN↔ODD at fire
   adaptiveInvertDirection: true, // Flip when session rolling WR < 44% (after 8+ trades)
 
+  entryConfirmVeryEarlyMs: 10000,
+  riseFallDuration: 30,
+  riseFallDurationUnit: 's',
 };
 
 const useConfigStore = create((set, get) => ({
@@ -124,7 +127,7 @@ const useConfigStore = create((set, get) => ({
     const prev = get();
     set(patch);
     if (enhancedTradeEngine.config) {
-      enhancedTradeEngine.config = { ...enhancedTradeEngine.config, ...patch };
+      enhancedTradeEngine.updateConfig(patch);
     }
     if (patch.strategy && patch.strategy !== prev.strategy) {
       enhancedTradeEngine.onStrategySwitch(patch.strategy);

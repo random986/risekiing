@@ -10,7 +10,7 @@ const STATUS_STYLE = {
   WARMING: { bg: 'rgba(255,255,255,0.04)', color: 'var(--text-muted)', label: 'WARMING' },
 };
 
-const SYNTHETIC_STRATEGIES = new Set(['BOTH', 'BOTH5', 'EO_WINNING', 'OU_WINNING', 'OMNISNIPER', 'OVER_6', 'UNDER_8_V1', 'OVER_3_V1', 'OVER_3_V2', 'OVER_5_V1', 'OVER_6_V2', 'UNDER_3_V1', 'UNDER_7_V1', 'EVEN_V1', 'ODD_V1', 'OVER_0_V1', 'UNDER_9_V1', 'RANDOM_PICKER']);
+const SYNTHETIC_STRATEGIES = new Set(['BOTH', 'BOTH5', 'EO_WINNING', 'OU_WINNING', 'OMNISNIPER', 'OVER_6', 'UNDER_8_V1', 'UNDER_8_V2', 'OVER_3_V1', 'OVER_3_V2', 'OVER_3_V3', 'OVER_5_V1', 'OVER_6_V2', 'UNDER_3_V1', 'UNDER_7_V1', 'EVEN_V1', 'ODD_V1', 'OVER_0_V1', 'UNDER_9_V1', 'O0_U9_HYBRID', 'RANDOM_PICKER']);
 
 function StatusBadge({ status }) {
   const cfg = STATUS_STYLE[status] || STATUS_STYLE.WATCHING;
@@ -170,3 +170,4 @@ export default function SyntheticLiveBoard() {
     </div>
   );
 }
+

@@ -1119,23 +1119,19 @@ class RealMarketEngine {
     const alreadyOpen = this.openTrades.some(t => !t.endTime && t.market === sym);
     if (alreadyOpen) return;
 
-    const cfg = useConfigStore.getState();
-    if (cfg?.takeProfit > 0) {
-      if (cfg.takeProfitType === 'wins') {
-        if (store.sessionWins >= cfg.takeProfit) {
-          store.setAutoTrade(false);
-          store.setEngineStatus('PAUSED');
-          store.pushTickFeed(`Take Profit reached — ${store.sessionWins} wins. Pausing new entries.`, 'var(--success)');
-          return;
-        }
-      } else {
-        if (store.dailyPnL >= cfg.takeProfit) {
-          store.setAutoTrade(false);
-          store.setEngineStatus('PAUSED');
-          store.pushTickFeed(`Take Profit reached — PnL is +$${store.dailyPnL.toFixed(2)}. Pausing new entries.`, 'var(--success)');
-          return;
-        }
-      }
+    // Check Daily Target and Stop Loss
+    if (store.dailyProfitTarget > 0 && store.dailyPnL >= store.dailyProfitTarget) {
+      store.setAutoTrade(false);
+      store.setEngineStatus('PAUSED');
+      store.pushTickFeed(`Take Profit reached — PnL is +$${store.dailyPnL.toFixed(2)}. Pausing new entries.`, 'var(--success)');
+      return;
+    }
+
+    if (store.dailyLossStop > 0 && store.dailyPnL <= -store.dailyLossStop) {
+      store.setAutoTrade(false);
+      store.setEngineStatus('PAUSED');
+      store.pushTickFeed(`Stop Loss reached — PnL is -$${Math.abs(store.dailyPnL).toFixed(2)}. Pausing new entries.`, 'var(--crimson)');
+      return;
     }
 
     let shouldTrade = false;
@@ -1266,8 +1262,8 @@ class RealMarketEngine {
     // Sold: finalize trade.
     this.openTrades.splice(idx, 1);
 
-    const won = contract.status === 'won';
     const profit = parseFloat(contract.profit) || 0;
+    const won = contract.status === 'won' || profit > 0;
 
     trade.won = won;
     trade.pnl = profit;

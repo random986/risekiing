@@ -24,7 +24,7 @@ const getAccountList = async (token) => {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
-      'Deriv-App-ID': '33h51PQlu5tsWflEmmoxW'
+      'Deriv-App-ID': '33I0ILZR9c4kZBvNkie3L'
     }
   });
 
@@ -132,10 +132,10 @@ export default function App() {
 
       const bodyParams = new URLSearchParams({
         grant_type: 'authorization_code',
-        client_id: '33h51PQlu5tsWflEmmoxW',
+        client_id: '33I0ILZR9c4kZBvNkie3L',
         code,
         code_verifier: verifier,
-        redirect_uri: 'https://derivprinter.beexelgraphics.com'
+        redirect_uri: 'http://system.summitafricaresearch.org'
       });
 
       fetch('https://auth.deriv.com/oauth2/token', {

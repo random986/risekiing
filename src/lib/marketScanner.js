@@ -90,7 +90,7 @@ function tailLossStreakFromEnd(digits, prices, dir, hottestDigit = null) {
   return streak;
 }
 
-/** Digit history depth — 200 ticks for volatility (100-window) + chi-square analysis. */
+/** Digit history depth — 1000 ticks for Rise/Fall condition + chi-square analysis. */
 export const APEX_TICK_CAP = 1000;
 export const APEX_ANALYSIS_WINDOW = 100;
 const BUFFER_SIZE = APEX_TICK_CAP;

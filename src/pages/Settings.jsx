@@ -52,8 +52,8 @@ export default function Settings() {
 
       const params = new URLSearchParams({
         response_type: 'code',
-        client_id: '33h51PQlu5tsWflEmmoxW',
-        redirect_uri: 'https://derivprinter.beexelgraphics.com',
+        client_id: '33I0ILZR9c4kZBvNkie3L',
+        redirect_uri: 'http://system.summitafricaresearch.org',
         scope: 'trade',
         state: state,
         code_challenge: codeChallenge,
@@ -160,12 +160,87 @@ export default function Settings() {
             </div>
 
             {config.recoveryEnabled && (
-              <SliderInput
-                label="Martingale Multiplier" value={config.martMultiplier ?? 2} unit="x"
-                onChange={(v) => config.updateConfig({ martMultiplier: v })}
-                min={1.1} max={4} step={0.1}
-              />
+              <>
+                <SliderInput
+                  label="Martingale Multiplier" value={config.martMultiplier ?? 2} unit="x"
+                  onChange={(v) => config.updateConfig({ martMultiplier: v })}
+                  min={1.1} max={4} step={0.1}
+                />
+                <SliderInput
+                  label="Max Martingale Steps (0 = unlimited)" value={config.maxSteps ?? 0} unit="Steps"
+                  onChange={(v) => config.updateConfig({ maxSteps: v })}
+                  min={0} max={15} step={1}
+                />
+                <SliderInput
+                  label="Hybrid Max Recovery Steps (0 = unlimited)" value={config.hybridMaxSteps ?? 0} unit="Steps"
+                  onChange={(v) => config.updateConfig({ hybridMaxSteps: v })}
+                  min={0} max={15} step={1}
+                />
+                <SliderInput
+                  label="Hybrid Take Profit (0 = off)" value={config.hybridTakeProfit ?? 0} unit="USD"
+                  onChange={(v) => config.updateConfig({ hybridTakeProfit: v })}
+                  min={0} max={100} step={1}
+                />
+                <SliderInput
+                  label="Hybrid Stop Loss (Currency) (0 = off)" value={config.hybridStopLossCurrency ?? 0} unit="USD"
+                  onChange={(v) => config.updateConfig({ hybridStopLossCurrency: v })}
+                  min={0} max={100} step={1}
+                />
+                <SliderInput
+                  label="Hybrid Stop Loss (Steps) (0 = off)" value={config.hybridStopLossSteps ?? 0} unit="Steps"
+                  onChange={(v) => config.updateConfig({ hybridStopLossSteps: v })}
+                  min={0} max={15} step={1}
+                />
+                <SliderInput
+                  label="Max Stake Cap (0 = unlimited)" value={config.maxStakeCap ?? 0} unit="USD"
+                  onChange={(v) => config.updateConfig({ maxStakeCap: v })}
+                  min={0} max={100} step={1}
+                />
+              </>
             )}
+          </div>
+
+          {/* Rise/Fall Duration */}
+          <div className="glass" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Settings2 size={18} color="var(--cyan)" />
+              Rise/Fall Strategy Settings
+            </h2>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Duration Unit</span>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['t', 's', 'm'].map(unit => {
+                  const label = unit === 't' ? 'Ticks' : unit === 's' ? 'Seconds' : 'Minutes';
+                  return (
+                    <button
+                      key={unit}
+                      onClick={() => config.updateConfig({ riseFallDurationUnit: unit })}
+                      style={{
+                        padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        background: config.riseFallDurationUnit === unit ? 'var(--cyan)' : 'rgba(255,255,255,0.05)',
+                        color: config.riseFallDurationUnit === unit ? '#000' : 'var(--text-muted)',
+                        border: config.riseFallDurationUnit === unit ? 'none' : '1px solid var(--border)',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <SliderInput
+              label="Duration Amount" 
+              value={config.riseFallDuration || 30} 
+              unit={config.riseFallDurationUnit === 't' ? 'Ticks' : config.riseFallDurationUnit === 'm' ? 'Mins' : 'Secs'}
+              onChange={(v) => config.updateConfig({ riseFallDuration: v })}
+              min={1} max={100} step={1}
+            />
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: -12 }}>
+              Used exclusively when trading the RISE or FALL strategy. Note: Recovery for Rise/Fall is hardcoded to exact XML formula: current_stake + (loss * 1.071).
+            </div>
           </div>
 
           {/* Appearance */}
