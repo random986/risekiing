@@ -17,6 +17,7 @@ import tradeEngine from './lib/enhancedTradeEngine';
 import { engine as realMarketEngine } from './lib/realMarketEngine';
 import useTradeStore from './store/useTradeStore';
 import { useRealMarketStore } from './stores/useRealMarketStore';
+import { APP_ID, getRedirectUri } from './config';
 
 // Helper to fetch account list using the new Options REST API
 const getAccountList = async (token) => {
@@ -24,7 +25,7 @@ const getAccountList = async (token) => {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
-      'Deriv-App-ID': '33I0ILZR9c4kZBvNkie3L'
+      'Deriv-App-ID': APP_ID
     }
   });
 
@@ -132,10 +133,10 @@ export default function App() {
 
       const bodyParams = new URLSearchParams({
         grant_type: 'authorization_code',
-        client_id: '33I0ILZR9c4kZBvNkie3L',
+        client_id: APP_ID,
         code,
         code_verifier: verifier,
-        redirect_uri: 'http://system.summitafricaresearch.org'
+        redirect_uri: getRedirectUri()
       });
 
       fetch('https://auth.deriv.com/oauth2/token', {

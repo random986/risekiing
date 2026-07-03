@@ -52,8 +52,8 @@ export default function Settings() {
 
       const params = new URLSearchParams({
         response_type: 'code',
-        client_id: '33I0ILZR9c4kZBvNkie3L',
-        redirect_uri: 'http://system.summitafricaresearch.org',
+        client_id: APP_ID,
+        redirect_uri: getRedirectUri(),
         scope: 'trade',
         state: state,
         code_challenge: codeChallenge,
