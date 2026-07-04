@@ -7793,9 +7793,17 @@ class EnhancedTradeEngine {
     this.activeMarket = lockedMarket;
 
     // ═══ PHASE 4: PLACE TRADE (always on locked market) ═══
+    // Pre-trade momentum gate: Don't trade blindly if the locked market is currently going against us.
+    const scoreResult = this._scoreMarketForRiseFall(lockedMarket, direction);
+    if (!scoreResult) {
+      this.updateStatus(`👁️ Waiting for better momentum on ${MARKET_LABELS[lockedMarket] || lockedMarket}...`);
+      this._scheduleNext(1000);
+      return;
+    }
+
     const stake = this._resolveTradeStake('SINGLE');
 
-    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)}`);
+    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)} (Score: ${scoreResult.score.toFixed(0)})`);
     this.updateStatus(`Placing ${this.strategy} Trade...`);
 
     this._placeTrade('SINGLE', this.strategy, stake, null, lockedMarket, {
