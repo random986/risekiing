@@ -7637,33 +7637,17 @@ class EnhancedTradeEngine {
 
   /**
    * Score a market for Rise/Fall suitability.
-   * Returns { score, riseRatio, fallRatio, maxStreak } or null if disqualified.
-   *
-   * Criteria:
-   *   1. No streak > 5 in the last 1000 ticks              (hard filter)
-   *   2. The market lightly favours the selected direction  (soft score)
-   *   3. It is not too one-sided (direction ratio < 65%)    (hard filter)
+   * Returns { score, riseRatio, fallRatio } or null if disqualified.
    */
   _scoreMarketForRiseFall(sym, direction) {
     const prices = scanner.priceBuffers[sym] || [];
     if (prices.length < 100) return null;
 
-    // --- Hard filter: no long streaks ---
-    let riseStreak = 0, fallStreak = 0, maxStreak = 0;
     let rises = 0, falls = 0;
     for (let i = 1; i < prices.length; i++) {
-      if (prices[i] > prices[i - 1]) {
-        riseStreak++; fallStreak = 0; rises++;
-      } else if (prices[i] < prices[i - 1]) {
-        fallStreak++; riseStreak = 0; falls++;
-      } else {
-        riseStreak = 0; fallStreak = 0;
-      }
-      const localMax = Math.max(riseStreak, fallStreak);
-      if (localMax > maxStreak) maxStreak = localMax;
+      if (prices[i] > prices[i - 1]) rises++;
+      else if (prices[i] < prices[i - 1]) falls++;
     }
-    // Streak filter removed as requested
-    // if (maxStreak > 5) return null;
 
     const total = rises + falls;
     if (total === 0) return null;
@@ -7671,16 +7655,53 @@ class EnhancedTradeEngine {
     const riseRatio = rises / total;
     const fallRatio = falls / total;
 
-    // --- Hard filter: reject too one-sided markets (> 65% in one direction) ---
+    // --- Hard filter: reject too one-sided markets (> 65% overall in one direction) ---
     if (riseRatio > 0.65 || fallRatio > 0.65) return null;
 
-    // --- Soft score: favour markets that lean towards our direction ---
-    const favourRatio = direction === 'RISE' ? riseRatio : fallRatio;
-    // Ideal range: 50-60%. Penalise below 45% (against us) and above 65% (too one-sided).
-    // A market at ~55% in our direction is perfect.
-    const score = favourRatio * 100;
+    // --- Immediate Momentum Analysis ---
+    // Look at the very end of the array to find the current active streak
+    let currentRiseStreak = 0;
+    let currentFallStreak = 0;
+    
+    // Count backwards from the most recent tick
+    for (let i = prices.length - 1; i > 0; i--) {
+      if (prices[i] > prices[i - 1]) {
+        if (currentFallStreak > 0) break; // streak broken
+        currentRiseStreak++;
+      } else if (prices[i] < prices[i - 1]) {
+        if (currentRiseStreak > 0) break; // streak broken
+        currentFallStreak++;
+      } else {
+        break; // flat tick breaks streak
+      }
+    }
 
-    return { score, riseRatio, fallRatio, maxStreak };
+    // --- New Filters: Avoid falling knives & exhausted trends ---
+    if (direction === 'RISE') {
+      // Reject if we are currently falling for 2 or more ticks
+      if (currentFallStreak >= 2) return null;
+      // Reject if the trend is exhausted (6 or more consecutive rises)
+      if (currentRiseStreak >= 6) return null;
+    } else { // direction === 'FALL'
+      // Reject if we are currently rising for 2 or more ticks
+      if (currentRiseStreak >= 2) return null;
+      // Reject if the trend is exhausted (6 or more consecutive falls)
+      if (currentFallStreak >= 6) return null;
+    }
+
+    // --- Scoring System ---
+    const favourRatio = direction === 'RISE' ? riseRatio : fallRatio;
+    let score = favourRatio * 100; // Base score out of ~65
+
+    // Momentum Boost: Catch the fresh wave!
+    const activeStreak = direction === 'RISE' ? currentRiseStreak : currentFallStreak;
+    if (activeStreak >= 1 && activeStreak <= 3) {
+      score += 50; // Massive boost for perfectly timed entry
+    } else if (activeStreak === 4 || activeStreak === 5) {
+      score += 20; // Moderate boost for an ongoing trend
+    }
+
+    return { score, riseRatio, fallRatio };
   }
 
   /**
