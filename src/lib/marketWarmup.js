@@ -6,7 +6,7 @@ import derivWS from './derivWS';
 import scanner, { MARKETS, APEX_TICK_CAP } from './marketScanner';
 
 export const WARMUP_MIN_TICKS = 30;
-export const WARMUP_TARGET_TICKS = APEX_TICK_CAP;
+export const WARMUP_TARGET_TICKS = 150; // Massively speeds up loading screen compared to 1000
 
 let tickHandlerRegistered = false;
 
@@ -93,7 +93,7 @@ async function sweepVLAfterPreload() {
  */
 export function connectAndWarmMarkets(account, {
   onProgress,
-  timeoutMs = 45000,
+  timeoutMs = 15000,
   minTicks = WARMUP_MIN_TICKS,
   onStatusChange,
 } = {}) {
