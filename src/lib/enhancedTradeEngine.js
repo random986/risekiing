@@ -7724,16 +7724,17 @@ class EnhancedTradeEngine {
       return;
     }
 
-    // ═══ PHASE 1: PAUSE COOLDOWN (counting ticks) ═══
-    if (this._rfPauseTicksRemaining > 0) {
-      this._rfPauseTicksRemaining--;
-      if (this._rfPauseTicksRemaining === 0) {
-        this._rfWaitingForReversal = true;
-        this.sendLog(`⏸️ Pause complete — now watching for reversal tick on ${MARKET_LABELS[this._rfLockedMarket] || this._rfLockedMarket}...`);
-      }
-      this.updateStatus(`⏸️ Cooling down after 3 losses (${this._rfPauseTicksRemaining} ticks left)...`);
+    // ═══ PHASE 1: PAUSE COOLDOWN (real time) ═══
+    if (this._rfPauseUntil && Date.now() < this._rfPauseUntil) {
+      const secsLeft = Math.ceil((this._rfPauseUntil - Date.now()) / 1000);
+      this.updateStatus(`⏸️ Cooling down after losses (${secsLeft}s left)...`);
       this._scheduleNext(500);
       return;
+    } else if (this._rfPauseUntil) {
+      // Pause just expired
+      this._rfPauseUntil = 0;
+      this._rfWaitingForReversal = true;
+      this.sendLog(`⏸️ Pause complete — now watching for reversal tick on ${MARKET_LABELS[this._rfLockedMarket] || this._rfLockedMarket}...`);
     }
 
     // ═══ PHASE 2: WAITING FOR STREAK TO BREAK (same locked market) ═══
@@ -7794,16 +7795,16 @@ class EnhancedTradeEngine {
 
     // ═══ PHASE 4: PLACE TRADE (always on locked market) ═══
     // Pre-trade momentum gate: Don't trade blindly if the locked market is currently going against us.
-    const scoreResult = this._scoreMarketForRiseFall(lockedMarket, direction);
-    if (!scoreResult) {
-      this.updateStatus(`👁️ Waiting for better momentum on ${MARKET_LABELS[lockedMarket] || lockedMarket}...`);
+    const isSafe = this._isLockedMarketSafe(lockedMarket, direction);
+    if (!isSafe) {
+      this.updateStatus(`👁️ Waiting for safe momentum on ${MARKET_LABELS[lockedMarket] || lockedMarket}...`);
       this._scheduleNext(1000);
       return;
     }
 
     const stake = this._resolveTradeStake('SINGLE');
 
-    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)} (Score: ${scoreResult.score.toFixed(0)})`);
+    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)} (Locked)`);
     this.updateStatus(`Placing ${this.strategy} Trade...`);
 
     this._placeTrade('SINGLE', this.strategy, stake, null, lockedMarket, {
@@ -11434,19 +11435,18 @@ class EnhancedTradeEngine {
         channel.step = hold > 0 ? Math.min(hold, prev + 1) : prev + 1;
         
         if (direction === 'RISE' || direction === 'FALL') {
-          // Hardcoded XML Recovery for Rise/Fall
-          const lossAmount = Math.abs(profit);
-          channel.stake = Number((channel.stake + (lossAmount * 1.071)).toFixed(2));
+          // Use standard martingale multiplier instead of hardcoded XML formula
+          channel.stake = this._getMartingaleStake(channel);
 
           // Track consecutive Rise/Fall losses and trigger pause at 3
           this._rfConsecutiveLosses = (this._rfConsecutiveLosses || 0) + 1;
           if (this._rfConsecutiveLosses >= 3) {
             const pauseTicks = 3 + Math.floor(Math.random() * 3); // 3, 4, or 5
-            this._rfPauseTicksRemaining = pauseTicks;
+            this._rfPauseUntil = Date.now() + (pauseTicks * 2000); // approx 2 seconds per tick
             this._rfWaitingForReversal = false; // Will be set true after pause ends
             this._rfPauseDirection = direction;
-            this.sendLog(`⚠️ Rise/Fall: 3 consecutive losses — pausing for ${pauseTicks} ticks then watching for reversal.`);
-            // After the pause ticks count down, _executeRiseFallCycle will flip to reversal-watch
+            this.sendLog(`⚠️ Rise/Fall: 3+ consecutive losses — pausing for ~${pauseTicks} ticks (${pauseTicks * 2}s) then watching for reversal.`);
+            // After the pause expires, _executeRiseFallCycle will flip to reversal-watch
             // We do NOT reset _rfConsecutiveLosses here; it resets on the next win
           }
         } else {
