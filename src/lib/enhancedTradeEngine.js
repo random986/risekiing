@@ -281,6 +281,7 @@ class EnhancedTradeEngine {
     this._rfPauseStartPrices = {};         // { sym: price } snapshot when pause began
     this._rfWaitingForReversal = false;    // True = waiting for 1 opposite tick after pause
     this._rfPauseDirection = null;         // The direction we were trading when pause triggered
+    this._rfLockedMarket = null;           // Locked market for the session — never switches mid-trade
 
     // --- VL quality gates ---
     this._lastTradeSettledAt = 0;
@@ -5032,6 +5033,13 @@ class EnhancedTradeEngine {
     this.lockedRecoveryMarket    = null;
     this.sessionConsecutiveLosses = 0;
 
+    // Reset Rise/Fall session lock
+    this._rfLockedMarket = null;
+    this._rfConsecutiveLosses = 0;
+    this._rfPauseTicksRemaining = 0;
+    this._rfWaitingForReversal = false;
+    this._rfPauseDirection = null;
+
     // MATCH_DIFF Auto-Restart schedule
     if (this._restartTimer) {
       clearTimeout(this._restartTimer);
@@ -7706,7 +7714,8 @@ class EnhancedTradeEngine {
 
   /**
    * Main Rise/Fall execution cycle.
-   * Handles: normal trading, 3-loss pause, reversal observation, and re-entry.
+   * Locks into a single market on first trade and stays there.
+   * Pauses after 3 consecutive losses, waits for reversal, then re-enters the SAME market.
    */
   _executeRiseFallCycle() {
     const channel = this.channels.SINGLE;
@@ -7719,32 +7728,29 @@ class EnhancedTradeEngine {
     if (this._rfPauseTicksRemaining > 0) {
       this._rfPauseTicksRemaining--;
       if (this._rfPauseTicksRemaining === 0) {
-        // Pause ended — now watch for one opposite-direction tick before re-entering
         this._rfWaitingForReversal = true;
-        this.sendLog(`⏸️ Pause complete — now watching for reversal tick...`);
+        this.sendLog(`⏸️ Pause complete — now watching for reversal tick on ${MARKET_LABELS[this._rfLockedMarket] || this._rfLockedMarket}...`);
       }
       this.updateStatus(`⏸️ Cooling down after 3 losses (${this._rfPauseTicksRemaining} ticks left)...`);
       this._scheduleNext(500);
       return;
     }
 
-    // ═══ PHASE 2: WAITING FOR STREAK TO BREAK ═══
+    // ═══ PHASE 2: WAITING FOR STREAK TO BREAK (same locked market) ═══
     if (this._rfWaitingForReversal) {
-      const mkt = this.activeMarket || 'R_50';
+      const mkt = this._rfLockedMarket || this.activeMarket || 'R_50';
       const prices = scanner.priceBuffers[mkt] || [];
       if (prices.length >= 2) {
         const last = prices[prices.length - 1];
         const prev = prices[prices.length - 2];
-        const lostDir = this._rfPauseDirection; // direction we were trading
-        // If trading RISE and losing → market was falling → wait for a RISE tick (last > prev) to confirm fall streak is broken
-        // If trading FALL and losing → market was rising → wait for a FALL tick (last < prev) to confirm rise streak is broken
+        const lostDir = this._rfPauseDirection;
         const streakBroken = lostDir === 'RISE' ? (last > prev) : (last < prev);
         if (streakBroken) {
           const oppositeStr = lostDir === 'RISE' ? 'fall' : 'rise';
           this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak broken on ${MARKET_LABELS[mkt] || mkt} — re-entering ${lostDir}.`);
           this._rfWaitingForReversal = false;
           this._rfPauseDirection = null;
-          // Fall through to normal trade placement below
+          // Fall through to trade placement below (same locked market)
         } else {
           const waitingFor = lostDir === 'RISE' ? 'rise' : 'fall';
           this.updateStatus(`👁️ Waiting for ${waitingFor} tick to break streak on ${MARKET_LABELS[mkt] || mkt}...`);
@@ -7757,34 +7763,42 @@ class EnhancedTradeEngine {
       }
     }
 
-    // ═══ PHASE 3: MARKET SELECTION ═══
+    // ═══ PHASE 3: MARKET SELECTION (only on first trade — then locked) ═══
     const direction = this.strategy; // 'RISE' or 'FALL'
-    let bestMarket = null;
-    let bestScore = -1;
 
-    for (const sym of MARKETS) {
-      const result = this._scoreMarketForRiseFall(sym, direction);
-      if (result && result.score > bestScore) {
-        bestScore = result.score;
-        bestMarket = sym;
+    if (!this._rfLockedMarket) {
+      // First trade of the session — scan and pick the best market, then lock in
+      let bestMarket = null;
+      let bestScore = -1;
+
+      for (const sym of MARKETS) {
+        const result = this._scoreMarketForRiseFall(sym, direction);
+        if (result && result.score > bestScore) {
+          bestScore = result.score;
+          bestMarket = sym;
+        }
       }
+
+      if (!bestMarket) {
+        this.updateStatus('🔍 No suitable market found — rescanning...');
+        this._scheduleNext(1000);
+        return;
+      }
+
+      this._rfLockedMarket = bestMarket;
+      this.sendLog(`🔒 Locked into ${MARKET_LABELS[bestMarket] || bestMarket} for this Rise/Fall session.`);
     }
 
-    if (!bestMarket) {
-      this.updateStatus('🔍 No suitable market found (streaks/bias) — rescanning...');
-      this._scheduleNext(1000);
-      return;
-    }
+    const lockedMarket = this._rfLockedMarket;
+    this.activeMarket = lockedMarket;
 
-    this.activeMarket = bestMarket;
-
-    // ═══ PHASE 4: PLACE TRADE ═══
+    // ═══ PHASE 4: PLACE TRADE (always on locked market) ═══
     const stake = this._resolveTradeStake('SINGLE');
 
-    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[bestMarket] || bestMarket} at $${stake.toFixed(2)} (bias score: ${bestScore.toFixed(1)}%)`);
+    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)}`);
     this.updateStatus(`Placing ${this.strategy} Trade...`);
 
-    this._placeTrade('SINGLE', this.strategy, stake, null, bestMarket, {
+    this._placeTrade('SINGLE', this.strategy, stake, null, lockedMarket, {
       duration: 1,
       durationUnit: 't'
     });
