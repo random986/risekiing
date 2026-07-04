@@ -7758,14 +7758,14 @@ class EnhancedTradeEngine {
     this.activeMarket = bestMarket;
 
     // ═══ PHASE 4: PLACE TRADE ═══
-    const stake = channel.stake || this.config.baseStake || 0.35;
+    const stake = this._resolveTradeStake('SINGLE');
 
     this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[bestMarket] || bestMarket} at $${stake.toFixed(2)} (bias score: ${bestScore.toFixed(1)}%)`);
     this.updateStatus(`Placing ${this.strategy} Trade...`);
 
     this._placeTrade('SINGLE', this.strategy, stake, null, bestMarket, {
-      duration: this.config.riseFallDuration || 30,
-      durationUnit: this.config.riseFallDurationUnit || 's'
+      duration: 1,
+      durationUnit: 't'
     });
   }
 
