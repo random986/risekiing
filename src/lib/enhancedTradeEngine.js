@@ -7741,20 +7741,35 @@ class EnhancedTradeEngine {
     if (this._rfWaitingForReversal) {
       const mkt = this._rfLockedMarket || this.activeMarket || 'R_50';
       const prices = scanner.priceBuffers[mkt] || [];
-      if (prices.length >= 2) {
-        const last = prices[prices.length - 1];
-        const prev = prices[prices.length - 2];
+      if (prices.length >= 3) {
+        // Calculate the current active streak in our direction
+        let currentRiseStreak = 0;
+        let currentFallStreak = 0;
+        for (let i = prices.length - 1; i > 0; i--) {
+          if (prices[i] > prices[i - 1]) {
+            if (currentFallStreak > 0) break;
+            currentRiseStreak++;
+          } else if (prices[i] < prices[i - 1]) {
+            if (currentRiseStreak > 0) break;
+            currentFallStreak++;
+          } else {
+            break;
+          }
+        }
+
         const lostDir = this._rfPauseDirection;
-        const streakBroken = lostDir === 'RISE' ? (last > prev) : (last < prev);
+        // Require 2 consecutive ticks in our direction as proof the loss streak is exhausted
+        const streakBroken = lostDir === 'RISE' ? (currentRiseStreak >= 2) : (currentFallStreak >= 2);
+        
         if (streakBroken) {
           const oppositeStr = lostDir === 'RISE' ? 'fall' : 'rise';
-          this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak broken on ${MARKET_LABELS[mkt] || mkt} — re-entering ${lostDir}.`);
+          this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak exhausted on ${MARKET_LABELS[mkt] || mkt} — re-entering ${lostDir}.`);
           this._rfWaitingForReversal = false;
           this._rfPauseDirection = null;
           // Fall through to trade placement below (same locked market)
         } else {
-          const waitingFor = lostDir === 'RISE' ? 'rise' : 'fall';
-          this.updateStatus(`👁️ Waiting for ${waitingFor} tick to break streak on ${MARKET_LABELS[mkt] || mkt}...`);
+          const waitingFor = lostDir === 'RISE' ? '2 rises' : '2 falls';
+          this.updateStatus(`👁️ Waiting for ${waitingFor} to prove streak exhausted on ${MARKET_LABELS[mkt] || mkt}...`);
           this._scheduleNext(500);
           return;
         }
