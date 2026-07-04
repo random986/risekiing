@@ -7662,8 +7662,8 @@ class EnhancedTradeEngine {
       const localMax = Math.max(riseStreak, fallStreak);
       if (localMax > maxStreak) maxStreak = localMax;
     }
-    // Disqualify if any streak exceeded 5
-    if (maxStreak > 5) return null;
+    // Streak filter removed as requested
+    // if (maxStreak > 5) return null;
 
     const total = rises + falls;
     if (total === 0) return null;

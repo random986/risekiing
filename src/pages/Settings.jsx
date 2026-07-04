@@ -451,14 +451,20 @@ export default function Settings() {
                     color: '#000',
                     border: 'none',
                     borderRadius: 6,
-                    padding: '12px 20px',
+                    padding: '12px 10px',
                     fontWeight: 700,
                     fontSize: 13,
                     cursor: 'pointer',
-                    boxShadow: '0 4px 15px rgba(0, 229, 255, 0.15)'
+                    boxShadow: '0 4px 15px rgba(0, 229, 255, 0.15)',
+                    whiteSpace: 'normal',
+                    minHeight: '44px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    wordBreak: 'break-word'
                   }}
                 >
-                  Connect with Deriv OAuth
+                  Connect to Deriv
                 </button>
               </div>
             )}
