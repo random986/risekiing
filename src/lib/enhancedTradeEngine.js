@@ -7644,108 +7644,75 @@ class EnhancedTradeEngine {
   }
 
   /**
-   * Score a market for Rise/Fall suitability.
+   * Helper: Calculate Simple Moving Average (SMA)
+   */
+  _calculateSMA(prices, period) {
+    if (prices.length < period) return null;
+    let sum = 0;
+    // Calculate average of the last `period` prices
+    for (let i = prices.length - period; i < prices.length; i++) {
+      sum += prices[i];
+    }
+    return sum / period;
+  }
+
+  /**
+   * Score a market for Rise/Fall suitability using MACRO Price Action (SMA).
    * Returns { score, riseRatio, fallRatio } or null if disqualified.
    */
   _scoreMarketForRiseFall(sym, direction) {
     const prices = scanner.priceBuffers[sym] || [];
-    if (prices.length < 100) return null;
+    if (prices.length < 50) return null; // Need at least 50 ticks for the Slow SMA
 
-    let rises = 0, falls = 0;
-    for (let i = 1; i < prices.length; i++) {
-      if (prices[i] > prices[i - 1]) rises++;
-      else if (prices[i] < prices[i - 1]) falls++;
-    }
+    const fastSMA = this._calculateSMA(prices, 14);
+    const slowSMA = this._calculateSMA(prices, 50);
+    if (fastSMA === null || slowSMA === null) return null;
 
-    const total = rises + falls;
-    if (total === 0) return null;
-
-    const riseRatio = rises / total;
-    const fallRatio = falls / total;
-
-    // --- Hard filter: reject too one-sided markets (> 65% overall in one direction) ---
-    if (riseRatio > 0.65 || fallRatio > 0.65) return null;
-
-    // --- Immediate Momentum Analysis ---
-    // Look at the very end of the array to find the current active streak
-    let currentRiseStreak = 0;
-    let currentFallStreak = 0;
+    const currentPrice = prices[prices.length - 1];
     
-    // Count backwards from the most recent tick
-    for (let i = prices.length - 1; i > 0; i--) {
-      if (prices[i] > prices[i - 1]) {
-        if (currentFallStreak > 0) break; // streak broken
-        currentRiseStreak++;
-      } else if (prices[i] < prices[i - 1]) {
-        if (currentRiseStreak > 0) break; // streak broken
-        currentFallStreak++;
+    let score = 0;
+
+    if (direction === 'RISE') {
+      // Uptrend structure: Fast MA > Slow MA AND Price >= Fast MA
+      if (fastSMA > slowSMA && currentPrice >= fastSMA) {
+         // Score based on how far apart the moving averages are (trend momentum)
+         const gap = ((fastSMA - slowSMA) / slowSMA) * 10000; 
+         score = gap;
       } else {
-        break; // flat tick breaks streak
+         return null; // Broken structure
+      }
+    } else { // FALL
+      // Downtrend structure: Fast MA < Slow MA AND Price <= Fast MA
+      if (fastSMA < slowSMA && currentPrice <= fastSMA) {
+         const gap = ((slowSMA - fastSMA) / slowSMA) * 10000;
+         score = gap;
+      } else {
+         return null; // Broken structure
       }
     }
 
-    // --- New Filters: Avoid falling knives & exhausted trends ---
-    if (direction === 'RISE') {
-      // Reject if we are currently falling for 2 or more ticks
-      if (currentFallStreak >= 2) return null;
-      // Reject if the trend is exhausted (6 or more consecutive rises)
-      if (currentRiseStreak >= 6) return null;
-    } else { // direction === 'FALL'
-      // Reject if we are currently rising for 2 or more ticks
-      if (currentRiseStreak >= 2) return null;
-      // Reject if the trend is exhausted (6 or more consecutive falls)
-      if (currentFallStreak >= 6) return null;
-    }
-
-    // --- Scoring System ---
-    const favourRatio = direction === 'RISE' ? riseRatio : fallRatio;
-    let score = favourRatio * 100; // Base score out of ~65
-
-    // Momentum Boost: Catch the fresh wave!
-    const activeStreak = direction === 'RISE' ? currentRiseStreak : currentFallStreak;
-    if (activeStreak >= 1 && activeStreak <= 3) {
-      score += 50; // Massive boost for perfectly timed entry
-    } else if (activeStreak === 4 || activeStreak === 5) {
-      score += 20; // Moderate boost for an ongoing trend
-    }
-
-    return { score, riseRatio, fallRatio };
+    return { score, riseRatio: 0.5, fallRatio: 0.5 };
   }
 
   /**
-   * Pre-trade momentum gate for locked Rise/Fall market.
-   * Returns true if the market's recent ticks favour our direction.
+   * Pre-trade safety gate. Checks if the macro trend support/resistance has broken.
    */
   _isLockedMarketSafe(sym, direction) {
     const prices = scanner.priceBuffers[sym] || [];
-    if (prices.length < 5) return false; // not enough data
+    if (prices.length < 14) return false;
 
-    // Look at the last 5 ticks to gauge immediate momentum
-    const recent = prices.slice(-5);
-    let rises = 0, falls = 0;
-    for (let i = 1; i < recent.length; i++) {
-      if (recent[i] > recent[i - 1]) rises++;
-      else if (recent[i] < recent[i - 1]) falls++;
+    const fastSMA = this._calculateSMA(prices, 14);
+    if (fastSMA === null) return false;
+
+    const currentPrice = prices[prices.length - 1];
+
+    if (direction === 'RISE') {
+      // Trend is broken if price falls significantly below the 14-period SMA
+      if (currentPrice < fastSMA) return false;
+    } else {
+      // Trend is broken if price rises significantly above the 14-period SMA
+      if (currentPrice > fastSMA) return false;
     }
-
-    // Count the current streak going against us
-    let againstStreak = 0;
-    for (let i = prices.length - 1; i > 0; i--) {
-      if (direction === 'RISE' && prices[i] < prices[i - 1]) {
-        againstStreak++;
-      } else if (direction === 'FALL' && prices[i] > prices[i - 1]) {
-        againstStreak++;
-      } else {
-        break;
-      }
-    }
-
-    // Block if 3+ consecutive ticks going against our direction
-    if (againstStreak >= 3) return false;
-
-    // Block if majority of recent ticks are against us
-    if (direction === 'RISE' && falls > rises && falls >= 3) return false;
-    if (direction === 'FALL' && rises > falls && rises >= 3) return false;
 
     return true;
   }
@@ -11506,18 +11473,6 @@ class EnhancedTradeEngine {
         if (direction === 'RISE' || direction === 'FALL') {
           // Use standard martingale multiplier instead of hardcoded XML formula
           channel.stake = this._getMartingaleStake(channel);
-
-          // Track consecutive Rise/Fall losses and trigger pause at 3
-          this._rfConsecutiveLosses = (this._rfConsecutiveLosses || 0) + 1;
-          if (this._rfConsecutiveLosses >= 3) {
-            const pauseTicks = 3 + Math.floor(Math.random() * 3); // 3, 4, or 5
-            this._rfPauseUntil = Date.now() + (pauseTicks * 2000); // approx 2 seconds per tick
-            this._rfWaitingForReversal = false; // Will be set true after pause ends
-            this._rfPauseDirection = direction;
-            this.sendLog(`⚠️ Rise/Fall: 3+ consecutive losses — pausing for ~${pauseTicks} ticks (${pauseTicks * 2}s) then watching for reversal.`);
-            // After the pause expires, _executeRiseFallCycle will flip to reversal-watch
-            // We do NOT reset _rfConsecutiveLosses here; it resets on the next win
-          }
         } else {
           channel.stake = this._getMartingaleStake(channel);
         }
