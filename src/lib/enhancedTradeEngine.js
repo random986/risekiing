@@ -7661,7 +7661,7 @@ class EnhancedTradeEngine {
    */
   _scoreMarketForRiseFall(sym, direction) {
     const prices = scanner.priceBuffers[sym] || [];
-    if (prices.length < 50) return null; // Need at least 50 ticks for the Slow SMA
+    if (prices.length < 50) return null;
 
     const fastSMA = this._calculateSMA(prices, 14);
     const slowSMA = this._calculateSMA(prices, 50);
@@ -7669,40 +7669,18 @@ class EnhancedTradeEngine {
 
     const currentPrice = prices[prices.length - 1];
     
-    // Count micro streaks
-    let currentRiseStreak = 0;
-    let currentFallStreak = 0;
-    for (let i = prices.length - 1; i > 0; i--) {
-      if (prices[i] > prices[i - 1]) {
-        if (currentFallStreak > 0) break;
-        currentRiseStreak++;
-      } else if (prices[i] < prices[i - 1]) {
-        if (currentRiseStreak > 0) break;
-        currentFallStreak++;
-      } else {
-        break;
-      }
-    }
-
     let score = 0;
 
+    // Macro filter: Only score markets that are strongly trending
     if (direction === 'RISE') {
-      if (currentFallStreak >= 2) return null; // Micro block (falling)
-      if (currentRiseStreak >= 6) return null; // Exhaustion block
-      // Uptrend structure: Fast MA > Slow MA AND Price >= Fast MA
-      if (fastSMA > slowSMA && currentPrice >= fastSMA) {
-         const gap = ((fastSMA - slowSMA) / slowSMA) * 10000; 
-         score = gap;
+      if (fastSMA > slowSMA && currentPrice > fastSMA) {
+         score = ((fastSMA - slowSMA) / slowSMA) * 10000; 
       } else {
          return null;
       }
     } else { // FALL
-      if (currentRiseStreak >= 2) return null; // Micro block (rising)
-      if (currentFallStreak >= 6) return null; // Exhaustion block
-      // Downtrend structure: Fast MA < Slow MA AND Price <= Fast MA
-      if (fastSMA < slowSMA && currentPrice <= fastSMA) {
-         const gap = ((slowSMA - fastSMA) / slowSMA) * 10000;
-         score = gap;
+      if (fastSMA < slowSMA && currentPrice < fastSMA) {
+         score = ((slowSMA - fastSMA) / slowSMA) * 10000;
       } else {
          return null;
       }
@@ -7712,7 +7690,10 @@ class EnhancedTradeEngine {
   }
 
   /**
-   * Pre-trade safety gate. Checks if macro trend or micro momentum has broken.
+   * Pre-trade safety gate. Implements the Pullback Resumption Strategy.
+   * - Macro Trend must be intact.
+   * - Must have just experienced a pullback.
+   * - Current tick must be a strong resumption in our direction.
    */
   _isLockedMarketSafe(sym, direction) {
     const prices = scanner.priceBuffers[sym] || [];
@@ -7722,22 +7703,41 @@ class EnhancedTradeEngine {
     if (fastSMA === null) return false;
 
     const currentPrice = prices[prices.length - 1];
+    const prevPrice = prices[prices.length - 2];
+    const prevPrevPrice = prices[prices.length - 3];
 
-    let againstStreak = 0;
-    for (let i = prices.length - 1; i > 0; i--) {
-      if (direction === 'RISE' && prices[i] < prices[i - 1]) againstStreak++;
-      else if (direction === 'FALL' && prices[i] > prices[i - 1]) againstStreak++;
-      else break;
+    // 1. MACRO CHECK
+    if (direction === 'RISE') {
+      if (currentPrice < fastSMA) return false; // Macro uptrend broken
+    } else {
+      if (currentPrice > fastSMA) return false; // Macro downtrend broken
     }
 
-    // Micro check: block on 2 ticks against us
-    if (againstStreak >= 2) return false;
-
-    // Macro check
+    // 2. MICRO PULLBACK RESUMPTION CHECK (The 1-Tick Sniper)
+    // We want to enter EXACTLY when a pullback finishes and the trend resumes.
+    
     if (direction === 'RISE') {
-      if (currentPrice < fastSMA) return false;
-    } else {
-      if (currentPrice > fastSMA) return false;
+      // Pullback condition: Previous tick was RED (down)
+      const hadPullback = prevPrice < prevPrevPrice;
+      
+      // Resumption condition: Current tick is GREEN (up) and ideally breaks above the pullback
+      const isResuming = currentPrice > prevPrice;
+      
+      // Only enter if we just bounced off a dip
+      if (!hadPullback || !isResuming) {
+        return false;
+      }
+    } else { // FALL
+      // Pullback condition: Previous tick was GREEN (up)
+      const hadPullback = prevPrice > prevPrevPrice;
+      
+      // Resumption condition: Current tick is RED (down)
+      const isResuming = currentPrice < prevPrice;
+      
+      // Only enter if we just bounced off a peak
+      if (!hadPullback || !isResuming) {
+        return false;
+      }
     }
 
     return true;
