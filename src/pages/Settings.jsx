@@ -7,7 +7,7 @@ import useAccountStore from '../store/useAccountStore';
 import useConnectionStore from '../store/useConnectionStore';
 import { useRealMarketStore } from '../stores/useRealMarketStore';
 import { generatePKCE } from '../lib/pkce';
-
+import { APP_ID, getRedirectUri } from '../config';
 
 
 function SliderInput({ label, value, onChange, min, max, step, unit = '' }) {
