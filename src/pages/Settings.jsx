@@ -447,21 +447,19 @@ export default function Settings() {
                   onClick={handleLogin}
                   style={{
                     width: '100%',
-                    background: 'linear-gradient(135deg, var(--cyan) 0%, #00b0ff 100%)',
-                    color: '#000',
+                    background: 'var(--cyan)',
+                    color: '#ffffff',
                     border: 'none',
-                    borderRadius: 6,
-                    padding: '12px 10px',
-                    fontWeight: 700,
-                    fontSize: 13,
+                    borderRadius: 8,
+                    padding: '12px 20px',
+                    fontWeight: 600,
+                    fontSize: 14,
                     cursor: 'pointer',
-                    boxShadow: '0 4px 15px rgba(0, 229, 255, 0.15)',
-                    whiteSpace: 'normal',
-                    minHeight: '44px',
+                    boxShadow: '0 4px 15px rgba(255, 68, 79, 0.25)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    wordBreak: 'break-word'
+                    transition: 'all 0.2s ease',
                   }}
                 >
                   Connect to Deriv
