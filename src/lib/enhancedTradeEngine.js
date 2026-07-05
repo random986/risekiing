@@ -7713,6 +7713,44 @@ class EnhancedTradeEngine {
   }
 
   /**
+   * Pre-trade momentum gate for locked Rise/Fall market.
+   * Returns true if the market's recent ticks favour our direction.
+   */
+  _isLockedMarketSafe(sym, direction) {
+    const prices = scanner.priceBuffers[sym] || [];
+    if (prices.length < 5) return false; // not enough data
+
+    // Look at the last 5 ticks to gauge immediate momentum
+    const recent = prices.slice(-5);
+    let rises = 0, falls = 0;
+    for (let i = 1; i < recent.length; i++) {
+      if (recent[i] > recent[i - 1]) rises++;
+      else if (recent[i] < recent[i - 1]) falls++;
+    }
+
+    // Count the current streak going against us
+    let againstStreak = 0;
+    for (let i = prices.length - 1; i > 0; i--) {
+      if (direction === 'RISE' && prices[i] < prices[i - 1]) {
+        againstStreak++;
+      } else if (direction === 'FALL' && prices[i] > prices[i - 1]) {
+        againstStreak++;
+      } else {
+        break;
+      }
+    }
+
+    // Block if 3+ consecutive ticks going against our direction
+    if (againstStreak >= 3) return false;
+
+    // Block if majority of recent ticks are against us
+    if (direction === 'RISE' && falls > rises && falls >= 3) return false;
+    if (direction === 'FALL' && rises > falls && rises >= 3) return false;
+
+    return true;
+  }
+
+  /**
    * Main Rise/Fall execution cycle.
    * Locks into a single market on first trade and stays there.
    * Pauses after 3 consecutive losses, waits for reversal, then re-enters the SAME market.
