@@ -7772,15 +7772,62 @@ class EnhancedTradeEngine {
       // Pause just expired
       this._rfPauseUntil = 0;
       this._rfWaitingForReversal = true;
-      this.sendLog(`⏸️ Pause complete — now watching for reversal tick on ${MARKET_LABELS[this._rfLockedMarket] || this._rfLockedMarket}...`);
+      this.sendLog(`⏸️ Pause complete — checking markets...`);
     }
 
-    // ═══ PHASE 2: WAITING FOR STREAK TO BREAK (same locked market) ═══
+    const direction = this.strategy; // 'RISE' or 'FALL'
+
+    // ═══ DYNAMIC MARKET EVALUATION ═══
+    // Check if our current market is still viable
+    if (this._rfLockedMarket) {
+      const currentScore = this._scoreMarketForRiseFall(this._rfLockedMarket, direction);
+      const isSafe = this._isLockedMarketSafe(this._rfLockedMarket, direction);
+      
+      if (!currentScore || !isSafe) {
+        this.sendLog(`📉 Trend depleted/reversed on ${MARKET_LABELS[this._rfLockedMarket] || this._rfLockedMarket}. Searching for new market...`);
+        this._rfLockedMarket = null; 
+      }
+    }
+
+    // If we don't have a market (or it was just discarded), find the best one
+    if (!this._rfLockedMarket) {
+      let bestMarket = null;
+      let bestScore = -1;
+
+      for (const sym of MARKETS) {
+        const result = this._scoreMarketForRiseFall(sym, direction);
+        if (result && result.score > bestScore) {
+           if (this._isLockedMarketSafe(sym, direction)) {
+             bestScore = result.score;
+             bestMarket = sym;
+           }
+        }
+      }
+
+      if (!bestMarket) {
+        this.updateStatus('🔍 Scanning for strong trend...');
+        this._scheduleNext(1000);
+        return;
+      }
+
+      this._rfLockedMarket = bestMarket;
+      this.sendLog(`🎯 Switching to strong trend on ${MARKET_LABELS[bestMarket] || bestMarket}.`);
+      
+      // If we found a strong new market, we don't need to wait for a reversal anymore,
+      // because this new market already has the correct active trend!
+      if (this._rfWaitingForReversal) {
+         this._rfWaitingForReversal = false;
+         this._rfPauseDirection = null;
+      }
+    }
+
+    const lockedMarket = this._rfLockedMarket;
+    this.activeMarket = lockedMarket;
+
+    // ═══ PHASE 2: WAITING FOR STREAK TO BREAK (If we stayed on the SAME market after a loss streak) ═══
     if (this._rfWaitingForReversal) {
-      const mkt = this._rfLockedMarket || this.activeMarket || 'R_50';
-      const prices = scanner.priceBuffers[mkt] || [];
+      const prices = scanner.priceBuffers[lockedMarket] || [];
       if (prices.length >= 3) {
-        // Calculate the current active streak in our direction
         let currentRiseStreak = 0;
         let currentFallStreak = 0;
         for (let i = prices.length - 1; i > 0; i--) {
@@ -7796,18 +7843,16 @@ class EnhancedTradeEngine {
         }
 
         const lostDir = this._rfPauseDirection;
-        // Require 2 consecutive ticks in our direction as proof the loss streak is exhausted
         const streakBroken = lostDir === 'RISE' ? (currentRiseStreak >= 2) : (currentFallStreak >= 2);
         
         if (streakBroken) {
           const oppositeStr = lostDir === 'RISE' ? 'fall' : 'rise';
-          this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak exhausted on ${MARKET_LABELS[mkt] || mkt} — re-entering ${lostDir}.`);
+          this.sendLog(`🔄 Rise/Fall: ${oppositeStr} streak exhausted on ${MARKET_LABELS[lockedMarket] || lockedMarket} — re-entering ${lostDir}.`);
           this._rfWaitingForReversal = false;
           this._rfPauseDirection = null;
-          // Fall through to trade placement below (same locked market)
         } else {
           const waitingFor = lostDir === 'RISE' ? '2 rises' : '2 falls';
-          this.updateStatus(`👁️ Waiting for ${waitingFor} to prove streak exhausted on ${MARKET_LABELS[mkt] || mkt}...`);
+          this.updateStatus(`👁️ Waiting for ${waitingFor} to prove streak exhausted on ${MARKET_LABELS[lockedMarket] || lockedMarket}...`);
           this._scheduleNext(500);
           return;
         }
@@ -7817,37 +7862,8 @@ class EnhancedTradeEngine {
       }
     }
 
-    // ═══ PHASE 3: MARKET SELECTION (only on first trade — then locked) ═══
-    const direction = this.strategy; // 'RISE' or 'FALL'
-
-    if (!this._rfLockedMarket) {
-      // First trade of the session — scan and pick the best market, then lock in
-      let bestMarket = null;
-      let bestScore = -1;
-
-      for (const sym of MARKETS) {
-        const result = this._scoreMarketForRiseFall(sym, direction);
-        if (result && result.score > bestScore) {
-          bestScore = result.score;
-          bestMarket = sym;
-        }
-      }
-
-      if (!bestMarket) {
-        this.updateStatus('🔍 No suitable market found — rescanning...');
-        this._scheduleNext(1000);
-        return;
-      }
-
-      this._rfLockedMarket = bestMarket;
-      this.sendLog(`🔒 Locked into ${MARKET_LABELS[bestMarket] || bestMarket} for this Rise/Fall session.`);
-    }
-
-    const lockedMarket = this._rfLockedMarket;
-    this.activeMarket = lockedMarket;
-
-    // ═══ PHASE 4: PLACE TRADE (always on locked market) ═══
-    // Pre-trade momentum gate: Don't trade blindly if the locked market is currently going against us.
+    // ═══ PHASE 4: PLACE TRADE ═══
+    // We already checked safety during market selection, but do a final check just in case
     const isSafe = this._isLockedMarketSafe(lockedMarket, direction);
     if (!isSafe) {
       this.updateStatus(`👁️ Waiting for safe momentum on ${MARKET_LABELS[lockedMarket] || lockedMarket}...`);
@@ -7857,7 +7873,7 @@ class EnhancedTradeEngine {
 
     const stake = this._resolveTradeStake('SINGLE');
 
-    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)} (Locked)`);
+    this.sendLog(`📈 ${this.strategy} on ${MARKET_LABELS[lockedMarket] || lockedMarket} at $${stake.toFixed(2)} (Trend Following)`);
     this.updateStatus(`Placing ${this.strategy} Trade...`);
 
     this._placeTrade('SINGLE', this.strategy, stake, null, lockedMarket, {
